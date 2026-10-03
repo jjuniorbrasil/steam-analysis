@@ -10,4 +10,5 @@ dependencies = [
     "pandas>=3.0.6",
     "pandera>=0.33.1",
     "loguru>=0.7.3",
+    "pyarrow>=25.0.1",
 ]
