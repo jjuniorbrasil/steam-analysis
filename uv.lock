@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
 
 [[package]]
@@ -85,16 +85,25 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.5.10"
+version = "0.5.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/75/64/1e508d0f49f6e1b0646bfe0e87e81ab5757096cc55e61340513ebf3af4f7/cloakbrowser-0.5.10.tar.gz", hash = "sha256:143ffcc22b7480870920fa0941436e22facdabb6f8f24035c6927e67538ad6da", size = 5755341, upload-time = "2026-08-30T03:56:55.091Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bc/d1/657a2cf554241dbc2e2c2e099106462c982dca0fd49464a6b3baa7449751/cloakbrowser-0.5.11.tar.gz", hash = "sha256:198cb298b4992ec6438ee28b51c481c8371edc87ca85852849d76505bd4dbbdb", size = 5759638, upload-time = "2026-09-24T22:06:53.554Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/33/bb/06e84b852c965d895abfa9c334f1ade04e1a88662858926dfda6f79b4e87/cloakbrowser-0.5.10-py3-none-any.whl", hash = "sha256:2315a5aed8992c29212231f9924db6e5f444b0b6cb96b5f3a2241f306dc0e37f", size = 134753, upload-time = "2026-08-30T03:56:53.423Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/d5/325526cab1f240c8f2ed02d2de58bab836965a0522b89ad0d5dbb62e66f2/cloakbrowser-0.5.11-py3-none-any.whl", hash = "sha256:0f49392ca317c2393e99526131ad629d33bebb5fbf02be31cb4a49d596eeb752", size = 135959, upload-time = "2026-09-24T22:06:51.973Z" },
+]
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
 ]
 
 [[package]]
@@ -241,6 +250,19 @@ wheels = [
 ]
 
 [[package]]
+name = "loguru"
+version = "0.7.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl", hash = "sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c", size = 61595, upload-time = "2024-12-06T11:20:54.538Z" },
+]
+
+[[package]]
 name = "playwright"
 version = "1.63.0"
 source = { registry = "https://pypi.org/simple" }
@@ -287,12 +309,14 @@ source = { virtual = "." }
 dependencies = [
     { name = "cloakbrowser" },
     { name = "httpx" },
+    { name = "loguru" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "cloakbrowser", specifier = ">=0.5.10" },
+    { name = "cloakbrowser", specifier = ">=0.5.11" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "loguru", specifier = ">=0.7.3" },
 ]
 
 [[package]]
@@ -302,4 +326,13 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6/typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5", size = 113555, upload-time = "2026-07-02T08:40:05.92Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
+]
+
+[[package]]
+name = "win32-setctime"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/705086c9d734d3b663af0e9bb3d4de6578d08f46b1b101c2442fd9aecaa2/win32_setctime-1.2.0.tar.gz", hash = "sha256:ae1fdf948f5640aae05c511ade119313fb6a30d7eabe25fef9764dca5873c4c0", size = 4867, upload-time = "2024-12-07T15:28:28.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl", hash = "sha256:95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390", size = 4083, upload-time = "2024-12-07T15:28:26.465Z" },
 ]
