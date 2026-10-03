@@ -12,5 +12,9 @@ wheels/
 # Local config
 .env
 
-# Data
-data/
+# Dado bruto recriado pelo ingest.py.
+# A lista de IDs do SteamDB é entrada e fica no repositório.
+data/raw/*
+!data/raw/ids-steamdb-*.csv
+
+.docs
