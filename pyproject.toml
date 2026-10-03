@@ -7,5 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "cloakbrowser>=0.5.10",
     "httpx>=0.28.1",
+    "missingno>=0.5.2",
     "pandas>=3.0.6",
+    "pandera>=0.33.1",
 ]
