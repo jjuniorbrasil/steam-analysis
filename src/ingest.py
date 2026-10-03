@@ -51,7 +51,7 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
-        log(f"Invalid {name}={raw!r}, using {default}")
+        log(f"{name} inválido ({raw!r}), usando {default}")
         return default
 
 
@@ -77,11 +77,13 @@ def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Pat
     if path.exists():
         existing = extract_app_ids(path.read_text(encoding="utf-8"))
         if len(existing) >= target:
-            log(f"Reusing {path} ({len(existing)} ids)")
+            log(f"Reusando {path} ({len(existing)} ids)")
             return path
-        log(f"HTML has only {len(existing)} ids, scraping again for {target}")
+        log(f"O HTML tem só {len(existing)} ids, coletando de novo para {target}")
 
-    browser = launch(headless=True, humanize=True)
+    log("Abrindo o navegador (na primeira vez o CloakBrowser baixa o Chromium; isso pode demorar)")
+    browser = launch(headless=False, humanize=True)
+    
     try:
         page = browser.new_page()
         page.goto(STEAMDB_URL, wait_until="domcontentloaded", timeout=90_000)
@@ -90,7 +92,7 @@ def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Pat
 
         page_size = datatables_page_size(target)
         page.locator(LENGTH_SELECT).first.select_option(page_size)
-        log(f"Set table page length to {page_size} (target {target})")
+        log(f"Tamanho da página da tabela: {page_size} (meta {target})")
         page.wait_for_function(
             "n => document.querySelectorAll('table tbody tr.app[data-appid]').length >= n",
             arg=target,
@@ -98,10 +100,10 @@ def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Pat
         )
 
         count = page.locator("table tbody tr.app[data-appid]").count()
-        log(f"Table rows visible: {count}")
+        log(f"Linhas visíveis na tabela: {count}")
         path.write_text(page.content(), encoding="utf-8")
-        log(f"Saved {path} ({path.stat().st_size:,} bytes)")
-        log(f"Title: {page.title()}")
+        log(f"Salvo {path} ({path.stat().st_size:,} bytes)")
+        log(f"Título: {page.title()}")
     finally:
         browser.close()
     return path
@@ -196,7 +198,7 @@ def fetch_app_details(
     details = load_details(path)
     pending = [app_id for app_id in app_ids if app_id not in details]
     log(
-        f"{len(app_ids)} app ids, {len(details)} already saved, {len(pending)} to fetch"
+        f"{len(app_ids)} app ids, {len(details)} já salvos, {len(pending)} para buscar"
     )
     if not pending:
         save_details_json(path, details)
@@ -232,10 +234,10 @@ def fetch_app_details(
                 save_details_json(path, details)
 
             name = _app_name(record)
-            status = "ok" if record.get("success") else "no data"
+            status = "ok" if record.get("success") else "sem dados"
             log(f"[{i}/{len(pending)}] {app_id} {name} ({status})")
 
-    log(f"Saved {path} ({path.stat().st_size:,} bytes, {len(details)} apps)")
+    log(f"Salvo {path} ({path.stat().st_size:,} bytes, {len(details)} apps)")
 
 
 def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict:
@@ -248,8 +250,8 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
             response = client.get(APPDETAILS_URL, params={"appids": app_id})
         except httpx.HTTPError as exc:
             if attempt >= retries:
-                raise RuntimeError(f"Failed to fetch appdetails for {app_id}") from exc
-            log(f"  {app_id} request error ({attempt}/{retries}): {exc}")
+                raise RuntimeError(f"Falha ao buscar appdetails de {app_id}") from exc
+            log(f"  {app_id} erro na requisição ({attempt}/{retries}): {exc}")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -258,7 +260,7 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
             retry_after = response.headers.get("Retry-After")
             sleep_for = float(retry_after) if retry_after else rate_backoff
             sleep_for = max(sleep_for, rate_backoff)
-            log(f"  429 rate limited, sleeping {sleep_for:.0f}s")
+            log(f"  429 limite de taxa, aguardando {sleep_for:.0f}s")
             time.sleep(sleep_for)
             rate_backoff = min(rate_backoff * 1.5, 300.0)
             continue
@@ -266,7 +268,7 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         if response.status_code >= 500:
             if attempt >= retries:
                 response.raise_for_status()
-            log(f"  {app_id} HTTP {response.status_code}, retrying in {backoff:.0f}s")
+            log(f"  {app_id} HTTP {response.status_code}, tentando de novo em {backoff:.0f}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -275,8 +277,8 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         data = response.json()
         if data is None:
             if attempt >= retries:
-                raise RuntimeError(f"Empty JSON for {app_id} after {retries} retries")
-            log(f"  {app_id} empty JSON, retrying in {backoff:.0f}s")
+                raise RuntimeError(f"JSON vazio para {app_id} depois de {retries} tentativas")
+            log(f"  {app_id} JSON vazio, tentando de novo em {backoff:.0f}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -293,10 +295,12 @@ def _app_name(entry: object) -> str:
 
 def ingest() -> None:
     target = resolve_target_apps()
-    log(f"TARGET_APPS={target} (max {MAX_TARGET_APPS})")
+    log(f"TARGET_APPS={target} (máx. {MAX_TARGET_APPS})")
+
     html_path = scrape_gameratings(target=target)
     app_ids = extract_app_ids(html_path.read_text(encoding="utf-8"), limit=target)
-    log(f"Extracted {len(app_ids)} app ids")
+
+    log(f"Extraídos {len(app_ids)} app ids")
     fetch_app_details(app_ids)
 
 
