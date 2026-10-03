@@ -8,10 +8,7 @@ from pathlib import Path
 
 import httpx
 from cloakbrowser import launch
-
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
+from loguru import logger
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -51,7 +48,7 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
-        log(f"{name} inválido ({raw!r}), usando {default}")
+        logger.info(f"{name} inválido ({raw!r}), usando {default}")
         return default
 
 
@@ -77,11 +74,11 @@ def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Pat
     if path.exists():
         existing = extract_app_ids(path.read_text(encoding="utf-8"))
         if len(existing) >= target:
-            log(f"Reusando {path} ({len(existing)} ids)")
+            logger.info(f"Reusando {path} ({len(existing)} ids)")
             return path
-        log(f"O HTML tem só {len(existing)} ids, coletando de novo para {target}")
+        logger.info(f"O HTML tem só {len(existing)} ids, coletando de novo para {target}")
 
-    log("Abrindo o navegador (na primeira vez o CloakBrowser baixa o Chromium; isso pode demorar)")
+    logger.warning("Abrindo o navegador (na primeira vez o CloakBrowser baixa o Chromium; isso pode demorar)")
     browser = launch(headless=False, humanize=True)
     
     try:
@@ -92,7 +89,7 @@ def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Pat
 
         page_size = datatables_page_size(target)
         page.locator(LENGTH_SELECT).first.select_option(page_size)
-        log(f"Tamanho da página da tabela: {page_size} (meta {target})")
+        logger.info(f"Tamanho da página da tabela: {page_size} (meta {target})")
         page.wait_for_function(
             "n => document.querySelectorAll('table tbody tr.app[data-appid]').length >= n",
             arg=target,
@@ -100,10 +97,10 @@ def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Pat
         )
 
         count = page.locator("table tbody tr.app[data-appid]").count()
-        log(f"Linhas visíveis na tabela: {count}")
+        logger.info(f"Linhas visíveis na tabela: {count}")
         path.write_text(page.content(), encoding="utf-8")
-        log(f"Salvo {path} ({path.stat().st_size:,} bytes)")
-        log(f"Título: {page.title()}")
+        logger.info(f"Salvo {path} ({path.stat().st_size:,} bytes)")
+        logger.info(f"Título: {page.title()}")
     finally:
         browser.close()
     return path
@@ -197,7 +194,7 @@ def fetch_app_details(
     path.parent.mkdir(parents=True, exist_ok=True)
     details = load_details(path)
     pending = [app_id for app_id in app_ids if app_id not in details]
-    log(
+    logger.info(
         f"{len(app_ids)} app ids, {len(details)} já salvos, {len(pending)} para buscar"
     )
     if not pending:
@@ -235,9 +232,9 @@ def fetch_app_details(
 
             name = _app_name(record)
             status = "ok" if record.get("success") else "sem dados"
-            log(f"[{i}/{len(pending)}] {app_id} {name} ({status})")
+            logger.info(f"[{i}/{len(pending)}] {app_id} {name} ({status})")
 
-    log(f"Salvo {path} ({path.stat().st_size:,} bytes, {len(details)} apps)")
+    logger.info(f"Salvo {path} ({path.stat().st_size:,} bytes, {len(details)} apps)")
 
 
 def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict:
@@ -251,7 +248,7 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         except httpx.HTTPError as exc:
             if attempt >= retries:
                 raise RuntimeError(f"Falha ao buscar appdetails de {app_id}") from exc
-            log(f"  {app_id} erro na requisição ({attempt}/{retries}): {exc}")
+            logger.info(f"  {app_id} erro na requisição ({attempt}/{retries}): {exc}")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -260,7 +257,7 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
             retry_after = response.headers.get("Retry-After")
             sleep_for = float(retry_after) if retry_after else rate_backoff
             sleep_for = max(sleep_for, rate_backoff)
-            log(f"  429 limite de taxa, aguardando {sleep_for:.0f}s")
+            logger.info(f"  429 limite de taxa, aguardando {sleep_for:.0f}s")
             time.sleep(sleep_for)
             rate_backoff = min(rate_backoff * 1.5, 300.0)
             continue
@@ -268,7 +265,7 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         if response.status_code >= 500:
             if attempt >= retries:
                 response.raise_for_status()
-            log(f"  {app_id} HTTP {response.status_code}, tentando de novo em {backoff:.0f}s")
+            logger.info(f"  {app_id} HTTP {response.status_code}, tentando de novo em {backoff:.0f}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -278,7 +275,7 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         if data is None:
             if attempt >= retries:
                 raise RuntimeError(f"JSON vazio para {app_id} depois de {retries} tentativas")
-            log(f"  {app_id} JSON vazio, tentando de novo em {backoff:.0f}s")
+            logger.info(f"  {app_id} JSON vazio, tentando de novo em {backoff:.0f}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -295,12 +292,12 @@ def _app_name(entry: object) -> str:
 
 def ingest() -> None:
     target = resolve_target_apps()
-    log(f"TARGET_APPS={target} (máx. {MAX_TARGET_APPS})")
+    logger.info(f"TARGET_APPS={target} (máx. {MAX_TARGET_APPS})")
 
     html_path = scrape_gameratings(target=target)
     app_ids = extract_app_ids(html_path.read_text(encoding="utf-8"), limit=target)
 
-    log(f"Extraídos {len(app_ids)} app ids")
+    logger.info(f"Extraídos {len(app_ids)} app ids")
     fetch_app_details(app_ids)
 
 
