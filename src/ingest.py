@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -7,7 +8,6 @@ import time
 from pathlib import Path
 
 import httpx
-from cloakbrowser import launch
 from loguru import logger
 
 
@@ -24,21 +24,17 @@ def load_dotenv(path: Path = Path(".env")) -> None:
 
 load_dotenv()
 
-STEAMDB_URL = "https://steamdb.info/stats/gameratings/?min_reviews=500"
 APPDETAILS_URL = "https://store.steampowered.com/api/appdetails"
+FONTE = "steam-store"
+RAW_DIR = Path("data/raw")
+IDS_GLOB = "ids-steamdb-*.csv"
+IDS_DATE_RE = re.compile(r"ids-steamdb-(\d{8})\.csv$")
 
-HTML_PATH = Path("data/raw/gameratings.html")
-DETAILS_PATH = Path("data/raw/appdetails.json")
-DETAILS_JSONL_PATH = Path("data/raw/appdetails.jsonl")
-
+# A Steam responde 429 bem abaixo de 200/min; 40/min é o ritmo que aguenta.
+DEFAULT_RATE_PER_MINUTE = 40
 DEFAULT_TARGET_APPS = 1000
 MAX_TARGET_APPS = 5000
-DT_PAGE_SIZES = (25, 50, 100, 250, 500, 1000, 5000)
-# Steam appdetails 429s well below 200/min; 200 per 5 minutes is the practical cap.
-DEFAULT_RATE_PER_MINUTE = 40
-JSON_FLUSH_EVERY = 50
-LENGTH_SELECT = ".dt-length select, .dataTables_length select, select[name$='_length']"
-APP_ID_RE = re.compile(r'<tr class="app" data-appid="(\d+)"')
+SERVER_RETRIES = 5
 
 
 def _env_int(name: str, default: int) -> int:
@@ -48,158 +44,128 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
-        logger.info(f"{name} inválido ({raw!r}), usando {default}")
+        logger.warning(f"{name} inválido ({raw!r}), usando {default}")
         return default
-
-
-def resolve_target_apps() -> int:
-    return max(1, min(_env_int("TARGET_APPS", DEFAULT_TARGET_APPS), MAX_TARGET_APPS))
 
 
 def resolve_rate_per_minute() -> int:
     return max(1, _env_int("RATE_PER_MINUTE", DEFAULT_RATE_PER_MINUTE))
 
 
-def datatables_page_size(target: int) -> str:
-    for size in DT_PAGE_SIZES:
-        if size >= target:
-            return str(size)
-    return str(MAX_TARGET_APPS)
+def resolve_target_apps() -> int:
+    return max(1, min(_env_int("TARGET_APPS", DEFAULT_TARGET_APPS), MAX_TARGET_APPS))
 
 
-def scrape_gameratings(path: Path = HTML_PATH, target: int | None = None) -> Path:
-    if target is None:
-        target = resolve_target_apps()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        existing = extract_app_ids(path.read_text(encoding="utf-8"))
-        if len(existing) >= target:
-            logger.info(f"Reusando {path} ({len(existing)} ids)")
-            return path
-        logger.info(f"O HTML tem só {len(existing)} ids, coletando de novo para {target}")
-
-    logger.warning("Abrindo o navegador (na primeira vez o CloakBrowser baixa o Chromium; isso pode demorar)")
-    browser = launch(headless=False, humanize=True)
-    
-    try:
-        page = browser.new_page()
-        page.goto(STEAMDB_URL, wait_until="domcontentloaded", timeout=90_000)
-        page.wait_for_selector("table tbody tr.app[data-appid]", timeout=90_000)
-        page.wait_for_selector(LENGTH_SELECT, timeout=60_000)
-
-        page_size = datatables_page_size(target)
-        page.locator(LENGTH_SELECT).first.select_option(page_size)
-        logger.info(f"Tamanho da página da tabela: {page_size} (meta {target})")
-        page.wait_for_function(
-            "n => document.querySelectorAll('table tbody tr.app[data-appid]').length >= n",
-            arg=target,
-            timeout=180_000,
+def select_app_ids(app_ids: list[str], target: int) -> list[str]:
+    if target > len(app_ids):
+        logger.warning(
+            f"TARGET_APPS={target} passa da lista ({len(app_ids)} ids); usando {len(app_ids)}"
         )
+        return app_ids
+    return app_ids[:target]
 
-        count = page.locator("table tbody tr.app[data-appid]").count()
-        logger.info(f"Linhas visíveis na tabela: {count}")
-        path.write_text(page.content(), encoding="utf-8")
-        logger.info(f"Salvo {path} ({path.stat().st_size:,} bytes)")
-        logger.info(f"Título: {page.title()}")
-    finally:
-        browser.close()
+
+def resolve_ids_path() -> Path:
+    matches = sorted(RAW_DIR.glob(IDS_GLOB), key=lambda path: path.name)
+    if not matches:
+        raise FileNotFoundError(
+            "Nenhum data/raw/ids-steamdb-AAAAMMDD.csv. "
+            "Essa lista é a entrada da coleta, não uma etapa do script."
+        )
+    path = matches[-1]
+    if not IDS_DATE_RE.search(path.name):
+        raise FileNotFoundError(
+            f"{path.name} não traz a data da coleta no nome (ids-steamdb-AAAAMMDD.csv)."
+        )
+    if len(matches) > 1:
+        logger.info(f"Várias listas de IDs; usando a mais recente: {path.name}")
     return path
 
 
-def extract_app_ids(html: str, limit: int | None = None) -> list[str]:
+def collection_date(ids_path: Path) -> str:
+    match = IDS_DATE_RE.search(ids_path.name)
+    if match is None:
+        raise FileNotFoundError(f"Data ausente no nome de {ids_path.name}")
+    return match.group(1)
+
+
+def load_app_ids(path: Path) -> list[str]:
     seen: set[str] = set()
     app_ids: list[str] = []
-    for app_id in APP_ID_RE.findall(html):
-        if app_id not in seen:
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None or "appid" not in reader.fieldnames:
+            raise ValueError(f"{path} precisa ter a coluna appid")
+        for row in reader:
+            app_id = (row.get("appid") or "").strip()
+            if not app_id or app_id in seen:
+                continue
+            if not app_id.isdigit():
+                raise ValueError(f"appid inválido em {path}: {app_id!r}")
             seen.add(app_id)
             app_ids.append(app_id)
-            if limit is not None and len(app_ids) >= limit:
-                break
+    if not app_ids:
+        raise ValueError(f"{path} não tem nenhum appid")
     return app_ids
 
 
-def _as_record(app_id: str, entry: dict) -> dict:
-    record = {"appid": str(app_id), "success": bool(entry.get("success"))}
+def _as_record(app_id: str, entry: dict, *, coletado_em: str) -> dict:
+    record = {
+        "fonte": FONTE,
+        "fonte_url": APPDETAILS_URL,
+        "coletado_em": coletado_em,
+        "appid": str(app_id),
+        "success": bool(entry.get("success")),
+    }
     if "data" in entry:
         record["data"] = entry["data"]
     return record
 
 
-def _index_payload(raw: object) -> dict[str, dict]:
+def load_details(path: Path) -> dict[str, dict]:
     details: dict[str, dict] = {}
-    if isinstance(raw, list):
-        items = raw
-    elif isinstance(raw, dict):
-        if "appid" in raw and ("success" in raw or "data" in raw):
-            items = [raw]
-        else:
-            items = [
-                _as_record(str(app_id), entry)
-                for app_id, entry in raw.items()
-                if isinstance(entry, dict)
-            ]
-    else:
+    if not path.exists():
         return details
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if "appid" in item:
-            rec = _as_record(str(item["appid"]), item)
-        elif len(item) == 1:
-            app_id, entry = next(iter(item.items()))
-            rec = _as_record(str(app_id), entry if isinstance(entry, dict) else {})
-        else:
-            continue
-        details[rec["appid"]] = rec
+    with path.open(encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"JSON inválido em {path}:{line_no}") from exc
+            if not isinstance(item, dict) or "appid" not in item:
+                raise ValueError(f"Registro sem appid em {path}:{line_no}")
+            details[str(item["appid"])] = item
     return details
 
 
-def load_details(path: Path = DETAILS_PATH) -> dict[str, dict]:
-    details: dict[str, dict] = {}
-    jsonl_path = DETAILS_JSONL_PATH
-    if jsonl_path.exists():
-        with jsonl_path.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                details.update(_index_payload(json.loads(line)))
-    if path.exists():
-        details.update(_index_payload(json.loads(path.read_text(encoding="utf-8"))))
-    return details
-
-
-def save_details_json(path: Path, details: dict[str, dict]) -> None:
-    records = list(details.values())
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
-
-
-def append_detail(record: dict) -> None:
-    DETAILS_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with DETAILS_JSONL_PATH.open("a", encoding="utf-8") as fh:
+def append_detail(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        fh.flush()
 
 
 def fetch_app_details(
     app_ids: list[str],
-    path: Path = DETAILS_PATH,
+    path: Path,
     *,
+    coletado_em: str,
     rate_per_minute: int | None = None,
-) -> None:
+) -> int:
     if rate_per_minute is None:
         rate_per_minute = resolve_rate_per_minute()
     path.parent.mkdir(parents=True, exist_ok=True)
     details = load_details(path)
     pending = [app_id for app_id in app_ids if app_id not in details]
     logger.info(
-        f"{len(app_ids)} app ids, {len(details)} já salvos, {len(pending)} para buscar"
+        f"{len(app_ids)} app ids, {len(app_ids) - len(pending)} já salvos, "
+        f"{len(pending)} para buscar"
     )
     if not pending:
-        save_details_json(path, details)
-        return
+        return sum(1 for app_id in app_ids if app_id in details)
 
     min_interval = 60.0 / rate_per_minute
     headers = {
@@ -213,6 +179,7 @@ def fetch_app_details(
         "Referer": "https://store.steampowered.com/",
     }
     last_request = 0.0
+    fetched = 0
 
     with httpx.Client(headers=headers, timeout=30.0, follow_redirects=True) as client:
         for i, app_id in enumerate(pending, start=1):
@@ -224,20 +191,24 @@ def fetch_app_details(
             last_request = time.monotonic()
 
             entry = payload.get(app_id, payload)
-            record = _as_record(app_id, entry if isinstance(entry, dict) else {})
+            record = _as_record(
+                app_id,
+                entry if isinstance(entry, dict) else {},
+                coletado_em=coletado_em,
+            )
             details[app_id] = record
-            append_detail(record)
-            if i % JSON_FLUSH_EVERY == 0 or i == len(pending):
-                save_details_json(path, details)
+            append_detail(path, record)
+            fetched += 1
 
             name = _app_name(record)
             status = "ok" if record.get("success") else "sem dados"
             logger.info(f"[{i}/{len(pending)}] {app_id} {name} ({status})")
 
-    logger.info(f"Salvo {path} ({path.stat().st_size:,} bytes, {len(details)} apps)")
+    logger.info(f"{fetched} registros novos gravados em {path}")
+    return sum(1 for app_id in app_ids if app_id in details)
 
 
-def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict:
+def _get_appdetails(client: httpx.Client, app_id: str) -> dict:
     backoff = 15.0
     rate_backoff = 60.0
     attempt = 0
@@ -246,26 +217,37 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         try:
             response = client.get(APPDETAILS_URL, params={"appids": app_id})
         except httpx.HTTPError as exc:
-            if attempt >= retries:
+            if attempt >= SERVER_RETRIES:
                 raise RuntimeError(f"Falha ao buscar appdetails de {app_id}") from exc
-            logger.info(f"  {app_id} erro na requisição ({attempt}/{retries}): {exc}")
+            logger.warning(f"{app_id} erro na requisição ({attempt}/{SERVER_RETRIES}): {exc}")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
 
+        if response.status_code == 401:
+            raise RuntimeError(
+                f"Credencial recusada (401) ao buscar appdetails de {app_id}. "
+                "A coleta para aqui."
+            )
+
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
-            sleep_for = float(retry_after) if retry_after else rate_backoff
+            try:
+                sleep_for = float(retry_after) if retry_after else rate_backoff
+            except ValueError:
+                sleep_for = rate_backoff
             sleep_for = max(sleep_for, rate_backoff)
-            logger.info(f"  429 limite de taxa, aguardando {sleep_for:.0f}s")
+            logger.warning(f"429 limite de taxa, aguardando {sleep_for:.0f}s")
             time.sleep(sleep_for)
             rate_backoff = min(rate_backoff * 1.5, 300.0)
             continue
 
         if response.status_code >= 500:
-            if attempt >= retries:
+            if attempt >= SERVER_RETRIES:
                 response.raise_for_status()
-            logger.info(f"  {app_id} HTTP {response.status_code}, tentando de novo em {backoff:.0f}s")
+            logger.warning(
+                f"{app_id} HTTP {response.status_code}, tentando de novo em {backoff:.0f}s"
+            )
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -273,9 +255,9 @@ def _get_appdetails(client: httpx.Client, app_id: str, retries: int = 5) -> dict
         response.raise_for_status()
         data = response.json()
         if data is None:
-            if attempt >= retries:
-                raise RuntimeError(f"JSON vazio para {app_id} depois de {retries} tentativas")
-            logger.info(f"  {app_id} JSON vazio, tentando de novo em {backoff:.0f}s")
+            if attempt >= SERVER_RETRIES:
+                raise RuntimeError(f"JSON vazio para {app_id} depois de {SERVER_RETRIES} tentativas")
+            logger.warning(f"{app_id} JSON vazio, tentando de novo em {backoff:.0f}s")
             time.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
@@ -291,14 +273,19 @@ def _app_name(entry: object) -> str:
 
 
 def ingest() -> None:
+    ids_path = resolve_ids_path()
+    coletado_em = collection_date(ids_path)
     target = resolve_target_apps()
-    logger.info(f"TARGET_APPS={target} (máx. {MAX_TARGET_APPS})")
+    listed = load_app_ids(ids_path)
+    app_ids = select_app_ids(listed, target)
+    out_path = RAW_DIR / f"steam-appdetails-{coletado_em}.jsonl"
 
-    html_path = scrape_gameratings(target=target)
-    app_ids = extract_app_ids(html_path.read_text(encoding="utf-8"), limit=target)
-
-    logger.info(f"Extraídos {len(app_ids)} app ids")
-    fetch_app_details(app_ids)
+    logger.info(
+        f"Lista de entrada: {ids_path} ({len(listed)} ids no arquivo, "
+        f"TARGET_APPS={target}, {len(app_ids)} para coletar, data {coletado_em})"
+    )
+    total = fetch_app_details(app_ids, out_path, coletado_em=coletado_em)
+    logger.info(f"Coletados {total} registros em {out_path}")
 
 
 if __name__ == "__main__":
