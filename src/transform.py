@@ -4,7 +4,7 @@ A política é quarentena, não Fail-Stop. Parar o pipeline por demo, DLC ou fic
 vazia jogaria fora os jogos que passaram. Uma falha sem linha (coluna a mais,
 coluna faltando) continua interrompendo: aí não há registro para isolar.
 
-Regras de negócio, as duas no nível da tabela:
+Regras de negócio, as três no nível da tabela:
 
 preco_gratuidade_incoerente. Jogo grátis custa zero, e só jogo grátis custa zero.
 A API separa is_free de price_overview; a coleta mostrou os dois desalinhados
@@ -14,6 +14,9 @@ preco_convertido_e_imputado. Preço imputado não foi convertido de outra moeda.
 As taxas em TAXAS_PARA_BRL são suposição da equipe (valores redondos, não a
 cotação de 03/10/2026). Moeda fora dessa tabela não vira real por omissão:
 vai para a quarentena como moeda_sem_taxa.
+
+faixa_etaria_zero_sem_entidade. Faixa "0" só vale se alguma entidade de
+classificação a confirma. Sem entidade em ratings, "0" é ausência de dado.
 """
 
 from __future__ import annotations
@@ -25,8 +28,6 @@ from pathlib import Path
 import pandas as pd
 import pandera.pandas as pa
 from pandera.pandas import Check, Column, DataFrameSchema
-
-from domain.idades import IDADES
 from domain.taxas import TAXAS_PARA_BRL
 
 RAW = Path("data/raw")
@@ -46,9 +47,9 @@ CONTRATO = DataFrameSchema(
         ),
         "required_age": Column(
             str,
-            Check.isin(IDADES, error="required_age_fora_dominio"),
             nullable=False,
         ),
+        "entidade_faixa_etaria": Column(str, nullable=False),
         "is_free": Column(bool, nullable=False),
         "dlc": Column(int, Check.greater_than_or_equal_to(0, error="dlc_negativo"), nullable=False),
         "packages": Column(
@@ -74,7 +75,7 @@ CONTRATO = DataFrameSchema(
         "release_date": Column(
             "datetime64[ns]",
             Check.less_than_or_equal_to(DATA_COLETA, error="data_posterior_a_coleta"),
-            nullable=True,
+            nullable=False,
         ),
         "supported_languages": Column(str, nullable=False),
         "price_brl": Column(
@@ -96,6 +97,13 @@ CONTRATO = DataFrameSchema(
         Check(
             lambda df: ~(df["preco_convertido"] & df["price_brl_imputada"]),
             error="preco_convertido_e_imputado",
+        ),
+        Check(
+            lambda df: ~(
+                (df["required_age"] == "0")
+                & (df["entidade_faixa_etaria"] == ENTIDADE_NAO_INFORMADA)
+            ),
+            error="faixa_etaria_zero_sem_entidade",
         ),
     ],
     coerce=True,
@@ -187,16 +195,51 @@ def _limpar_idiomas(texto: object) -> str:
     return re.sub(r"\s*\*+", "", sem_html).strip()
 
 
-def _idade_dejus(ratings: object) -> str | None:
+# required_age da Steam vem "0" quando ninguém declarou idade; trato como ausência.
+IDADES_SEM_VALOR = {"", "0"}
+ENTIDADE_NAO_INFORMADA = "não informado"
+
+
+def _avaliacoes(ratings: object) -> dict[str, str]:
+    """{entidade: faixa} de toda entidade que avaliou, na ordem do JSON."""
     if not isinstance(ratings, dict):
-        return None
-    dejus = ratings.get("dejus")
-    if not isinstance(dejus, dict):
-        return None
-    idade = dejus.get("rating")
-    if idade is None:
-        return None
-    return str(idade).strip().upper()
+        return {}
+    avaliacoes: dict[str, str] = {}
+    for entidade, info in ratings.items():
+        if not isinstance(info, dict) or info.get("rating") is None:
+            continue
+        faixa = str(info["rating"]).strip().upper()
+        if faixa:
+            avaliacoes[str(entidade)] = faixa
+    return avaliacoes
+
+
+def _faixa_etaria(required_age: str, ratings: object) -> tuple[str, str]:
+    """Devolve (faixa etária, entidade que a deu).
+
+    1. dejus avaliou: vale a dejus.
+    2. required_age tem valor: a entidade é a que avaliou com esse mesmo valor.
+       Se nenhuma bate e o valor não é "0", fica o valor da Steam e a entidade
+       é "não informado".
+    3. sem valor ("" ou "0" que nenhuma entidade confirma): a primeira entidade
+       que avaliou, sem prioridade entre elas.
+    Sem entidade em nenhum passo, a entidade é "não informado". Faixa "0" nesse
+    caso é reprovada pelo contrato (faixa_etaria_zero_sem_entidade).
+    """
+    avaliacoes = _avaliacoes(ratings)
+    if "dejus" in avaliacoes:
+        return avaliacoes["dejus"], "dejus"
+
+    if required_age:
+        for entidade, faixa in avaliacoes.items():
+            if faixa == required_age:
+                return required_age, entidade
+        if required_age not in IDADES_SEM_VALOR:
+            return required_age, ENTIDADE_NAO_INFORMADA
+
+    for entidade, faixa in avaliacoes.items():
+        return faixa, entidade
+    return required_age, ENTIDADE_NAO_INFORMADA
 
 
 def _preco_brl(overview: object) -> tuple[float | None, bool, bool]:
@@ -258,12 +301,12 @@ def higienizar(df: pd.DataFrame) -> pd.DataFrame:
         errors="coerce",
     )
 
-    idades = fora["ratings"].map(_idade_dejus)
-    tem_dejus = idades.notna()
     fora["required_age"] = fora["required_age"].map(
         lambda valor: "" if pd.isna(valor) else str(valor).strip().upper()
     )
-    fora.loc[tem_dejus, "required_age"] = idades[tem_dejus]
+    faixas = [_faixa_etaria(idade, ratings) for idade, ratings in zip(fora["required_age"], fora["ratings"])]
+    fora["required_age"] = [faixa for faixa, _ in faixas]
+    fora["entidade_faixa_etaria"] = [entidade for _, entidade in faixas]
 
     precos = fora["price_overview"].map(_preco_brl)
     fora["price_brl"] = precos.map(lambda item: item[0])
