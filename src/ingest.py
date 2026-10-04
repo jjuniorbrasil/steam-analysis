@@ -29,6 +29,7 @@ load_dotenv()
 APPDETAILS_URL = "https://store.steampowered.com/api/appdetails"
 FONTE = "steam-store"
 RAW_DIR = Path("data/raw")
+APPDETAILS_PATH = RAW_DIR / "steam-appdetails.jsonl"
 IDS_GLOB = "ids-steamdb-*.csv"
 IDS_DATE_RE = re.compile(r"ids-steamdb-(\d{8})\.csv$")
 
@@ -303,7 +304,7 @@ def ingest() -> None:
     target = resolve_target_apps()
     listed = load_app_ids(ids_path)
     app_ids = select_app_ids(listed, target)
-    out_path = RAW_DIR / f"steam-appdetails-{coletado_em}.jsonl"
+    out_path = APPDETAILS_PATH
 
     logger.info(
         f"Lista de entrada: {ids_path} ({len(listed)} ids no arquivo, "

@@ -21,12 +21,12 @@ uv run python src/transform.py
 
 Não há chave para copiar. O `.env` é opcional. `TARGET_APPS` (padrão 1000, máximo 5000) define quantos IDs do início do CSV são consultados. `RATE_PER_MINUTE` (padrão 40) é o ritmo global das consultas à Steam. `CONCURRENT_REQUESTS` (padrão 4, máximo 8) manda várias ao mesmo tempo, sem passar desse ritmo.
 
-Rodar o `ingest.py` de novo não duplica registro. O que já está em `data/raw/steam-appdetails-20261003.jsonl` é pulado. Cada linha traz a fonte (`steam-store`) e a data da coleta (`20261003`). Um 401 interrompe a coleta; um 429 espera e segue; um 5xx tenta de novo e, se persistir, falha.
+Rodar o `ingest.py` de novo não duplica registro. O que já está em `data/raw/steam-appdetails.jsonl` é pulado. Cada linha traz a fonte (`steam-store`) e a data da coleta (`20261003`). Um 401 interrompe a coleta; um 429 espera e segue; um 5xx tenta de novo e, se persistir, falha.
 
 ## Saída
 
 | Caminho | O que é |
 |---|---|
-| `data/raw/steam-appdetails-20261003.jsonl` | Resposta do appdetails, um jogo por linha. Recriado pela coleta e fora do Git. |
-| `data/trusted/` | Registros que passaram no contrato, gravados por `src/transform.py`. |
-| `data/quarentena/` | Registros separados do conjunto trusted, com o motivo, gravados por `src/transform.py`. |
+| `data/raw/steam-appdetails.jsonl` | Resposta do appdetails, um jogo por linha. Recriado pela coleta e fora do Git. |
+| `data/trusted/jogos.parquet` | Jogos que passaram no contrato, gravados por `src/transform.py`. |
+| `data/quarentena/rejeitados.parquet` | Linhas fora do trusted, com o motivo, gravadas por `src/transform.py`. |

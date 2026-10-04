@@ -16,5 +16,7 @@ wheels/
 # A lista de IDs do SteamDB é entrada e fica no repositório.
 data/raw/*
 !data/raw/ids-steamdb-*.csv
+data/trusted/*
+data/quarentena/*
 
 .docs
