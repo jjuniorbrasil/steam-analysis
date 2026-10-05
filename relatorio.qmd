@@ -1,0 +1,263 @@
+---
+title: "Atividade prática da Etapa 1: do dado bruto à camada trusted"
+subtitle: "Introdução à Ciência de Dados · Sistemas de Informação · IFMA"
+lang: pt-BR
+format:
+  typst:
+    papersize: a4
+    margin:
+      x: 2cm
+      y: 2cm
+    fontsize: 10pt
+    section-numbering: "1."
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+# | label: setup
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, "src")
+from domain.taxas import TAXAS_PARA_BRL
+from transform import (
+    BRUTO,
+    DATA_COLETA,
+    QUARENTENA,
+    TRUSTED,
+    _mediana_dentro_do_iqr,
+    carregar,
+    data_da_coleta,
+    higienizar,
+)
+
+
+def n(valor) -> str:
+    return f"{int(valor):,}".replace(",", ".")
+
+
+def num(valor, casas: int = 1) -> str:
+    return f"{valor:,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def pct(parte, todo, casas: int = 1) -> str:
+    return num(100 * parte / todo, casas) + "%"
+
+
+# --- bruto ---------------------------------------------------------------
+linhas = [json.loads(l) for l in BRUTO.open(encoding="utf-8") if l.strip()]
+n_registros = len(linhas)
+coleta = data_da_coleta(BRUTO)
+coleta_txt = coleta.strftime("%d/%m/%Y")
+n_linhas_dup = n_registros - len({json.dumps(l, sort_keys=True) for l in linhas})
+n_appid_dup = n_registros - len({str(l["appid"]) for l in linhas})
+
+f, sem_ficha = carregar(BRUTO)
+n_fichas = len(f)
+n_sem_ficha = len(sem_ficha)
+
+tipos = f["type"].value_counts()
+n_game = int(tipos.get("game", 0))
+n_nao_game = n_fichas - n_game
+outros_tipos = ", ".join(f"{t} ({q})" for t, q in tipos.items() if t != "game")
+
+
+def nulo(coluna: str) -> int:
+    if coluna not in f:
+        return n_fichas
+    return int(f[coluna].map(lambda v: not isinstance(v, (dict, list, str)) or v == "").sum())
+
+
+n_meta_nulo = nulo("metacritic")
+n_ctrl_nulo = nulo("controller_support")
+n_rec_nulo = nulo("recommendations")
+n_ach_nulo = nulo("achievements")
+n_dlc_nulo = nulo("dlc")
+n_pkg_nulo = nulo("packages")
+valores_ctrl = sorted(f["controller_support"].dropna().unique())
+
+tem_preco = f["price_overview"].map(lambda v: isinstance(v, dict))
+gratis = f["is_free"] == True  # noqa: E712
+n_gratis = int(gratis.sum())
+n_pagos = n_fichas - n_gratis
+n_pagos_sem_preco = int((~gratis & ~tem_preco).sum())
+n_gratis_com_preco = int((gratis & tem_preco).sum())
+
+precos = pd.DataFrame(
+    [
+        {"appid": a, "name": nm, **po}
+        for a, nm, po in zip(f["appid"], f["name"], f["price_overview"])
+        if isinstance(po, dict)
+    ]
+)
+moedas = Counter(precos["currency"])
+n_moedas = len(moedas)
+n_brl = moedas.get("BRL", 0)
+n_nao_brl = len(precos) - n_brl
+moedas_txt = ", ".join(f"{m} ({q})" for m, q in moedas.most_common(5))
+moedas_sem_taxa = sorted(set(moedas) - set(TAXAS_PARA_BRL))
+
+exemplo = precos[precos["appid"] == "1336490"]
+if exemplo.empty or exemplo.iloc[0]["currency"] == "BRL":
+    exemplo = precos[precos["currency"] != "BRL"].sort_values("initial", ascending=False)
+ex = exemplo.iloc[0]
+ex_nome, ex_moeda = ex["name"], ex["currency"]
+ex_initial = n(ex["initial"])
+ex_falso = num(ex["initial"] / 100, 2)
+ex_brl = num(ex["initial"] / 100 * TAXAS_PARA_BRL.get(ex_moeda, float("nan")), 2)
+
+idade_bruta = f["required_age"]
+eh_numero = idade_bruta.map(lambda v: isinstance(v, (int, float)))
+zero = idade_bruta.map(lambda v: str(v).strip() == "0")
+n_zero = int(zero.sum())
+n_idade_num = int(eh_numero.sum())
+n_idade_txt = int(idade_bruta.map(lambda v: isinstance(v, str)).sum())
+zero_so_numero = bool((eh_numero == zero).all())
+tem_dejus = f["ratings"].map(lambda r: isinstance(r, dict) and isinstance(r.get("dejus"), dict))
+tem_entidade = f["ratings"].map(lambda r: isinstance(r, dict) and len(r) > 0)
+n_zero_dejus = int((zero & tem_dejus).sum())
+n_zero_sem_entidade = int((zero & ~tem_entidade).sum())
+
+h = higienizar(f)
+datas_brutas = f["release_date"].map(lambda v: v.get("date") if isinstance(v, dict) else v)
+nat = h["release_date"].isna()
+n_nat = int(nat.sum())
+n_nat_vazia = int((nat & datas_brutas.fillna("").astype(str).str.strip().eq("")).sum())
+ex_nat = next((d for d in datas_brutas[nat] if isinstance(d, str) and d.strip()), "")
+n_futuras = int((h["release_date"] > DATA_COLETA).sum())
+data_max = h["release_date"].max()
+ano_min = int(h["release_date"].dt.year.min())
+
+jogos = h[h["type"] == "game"].copy()
+jogos["faixa"] = pd.cut(
+    jogos["release_date"].dt.year,
+    [0, 2010, 2015, 2020, 3000],
+    labels=["até 2010", "2011-2015", "2016-2020", "2021 em diante"],
+)
+jogos["sem_metacritic"] = f.loc[jogos.index, "metacritic"].map(lambda v: not isinstance(v, dict))
+por_faixa = jogos.groupby("faixa", observed=True).agg(
+    meta_nulo=("sem_metacritic", "mean"),
+    jogos=("appid", "size"),
+    rec_nulo=("recommendations", lambda s: s.isna().mean()),
+    ach_nulo=("achievements", lambda s: s.isna().mean()),
+    rec_mediana=("recommendations", "median"),
+)
+recente = por_faixa.loc["2021 em diante"]
+antigo = por_faixa.loc["até 2010"]
+n_recentes = int(recente["jogos"])
+
+
+# --- mascaramento (mesma regra do diagnostico.qmd) -----------------------
+def mascarar(coluna: str, semente: int = 42) -> tuple[float, float, float]:
+    base = jogos.copy()
+    base["faixa"] = base["faixa"].astype(object).fillna("sem data")
+    taxa = base.groupby("faixa")[coluna].apply(lambda s: s.isna().mean()).fillna(0)
+    observados = base[base[coluna].notna()]
+    escondidos = pd.concat(
+        [g.sample(frac=min(taxa[k], 1.0), random_state=semente) for k, g in observados.groupby("faixa")]
+    )
+    estimado = _mediana_dentro_do_iqr(observados.drop(index=escondidos.index)[coluna])
+    erro = (estimado - escondidos[coluna]).abs()
+    return estimado, float(erro.median()), float(erro.quantile(0.9))
+
+
+rec_est, rec_erro, rec_p90 = mascarar("recommendations")
+ach_est, ach_erro, ach_p90 = mascarar("achievements")
+
+# --- saídas do transform.py ----------------------------------------------
+trusted = pd.read_parquet(TRUSTED)
+quarentena = pd.read_parquet(QUARENTENA) if QUARENTENA.exists() else pd.DataFrame(columns=["motivo"])
+n_trusted = len(trusted)
+n_quarentena = len(quarentena)
+n_imp_rec = int(trusted["recommendations_imputada"].sum())
+n_imp_ach = int(trusted["achievements_imputada"].sum())
+n_imp_preco = int(trusted["price_brl_imputada"].sum())
+n_convertidos = int(trusted["preco_convertido"].sum())
+n_sem_suporte = int(trusted["controller_support"].eq("sem suporte").sum())
+n_dejus = int(trusted["entidade_faixa_etaria"].eq("dejus").sum())
+n_outra_entidade = int((~trusted["entidade_faixa_etaria"].isin(["dejus", "não informado"])).sum())
+n_entidade_ni = int(trusted["entidade_faixa_etaria"].eq("não informado").sum())
+
+motivos = quarentena["motivo"].astype(str).str.split(", ").explode().value_counts()
+
+
+def motivo(nome: str) -> str:
+    return n(motivos.get(nome, 0))
+
+
+n_q_combinada = int(quarentena["motivo"].astype(str).str.contains(", ").sum())
+```
+
+**Integrantes.** José Carlos — matrícula · Rudney Gabriel — matrícula
+
+**Coleta analisada.** Lista de IDs de `{python} coleta_txt` (carimbo `coletado_em`), consultada na Steam em 05/10/2026. `{python} n(n_registros)` registros em `data/raw/steam-appdetails.jsonl`.
+
+# A fonte e a coleta
+
+A fonte é a API pública [`appdetails`](https://store.steampowered.com/api/appdetails) da Steam Store, sem chave nem cadastro. A pergunta que orienta o recorte: **entre os jogos mais bem avaliados da Steam, o preço em reais, a gratuidade e o rótulo indie acompanham o volume de recomendações?** Ela pede preço comparável, tipo de lançamento, gêneros e recomendações, e é isso que o contrato guarda.
+
+Quais jogos consultar é uma entrada, não uma etapa do script: `data/raw/ids-steamdb-20261003.csv` guarda os 5.000 primeiros da página [Top Rated](https://steamdb.info/stats/gameratings/?min_reviews=500) do SteamDB (pelo menos 500 avaliações), salva no navegador em 03/10/2026. O `ingest.py` consulta os primeiros `TARGET_APPS=1000`, na ordem do arquivo.
+
+Vieram `{python} n(n_registros)` registros, um por `appid`. `{python} n(n_fichas)` trazem ficha (`success=true`) e `{python} n(n_sem_ficha)` vieram vazios. Três coisas surpreenderam:
+
+- **O ranking não é só de jogos.** `{python} n(n_nao_game)` fichas têm `type` diferente de `game`: `{python} outros_tipos`.
+- **O preço nem sempre vem em real.** Consultando do Brasil e sem o parâmetro de região, a API devolveu `{python} n_moedas` moedas: `{python} n(n_nao_brl)` de `{python} n(len(precos))` preços (`{python} pct(n_nao_brl, len(precos))`) estão fora do BRL. As mais comuns são `{python} moedas_txt`. E o valor vem em centavos da moeda.
+- **Algumas datas vêm no idioma local.** `{python} n(n_nat)` datas de lançamento não são lidas como data (por exemplo, `{python} ex_nat`).
+
+# Perfil de qualidade (Batini)
+
+Os percentuais abaixo são sobre as `{python} n(n_fichas)` fichas, salvo quando indicado.
+
+**Completude.** Faltam `{python} n(n_sem_ficha)` fichas inteiras (`success=false`). Por coluna: `metacritic` falta em `{python} pct(n_meta_nulo, n_fichas)`, `controller_support` em `{python} pct(n_ctrl_nulo, n_fichas)`, `achievements` em `{python} pct(n_ach_nulo, n_fichas)` e `recommendations` em `{python} pct(n_rec_nulo, n_fichas)`. O preço falta em `{python} n(n_gratis)` jogos gratuitos (`{python} pct(n_gratis, n_fichas)`), mas isso é estrutural. Entre os `{python} n(n_pagos)` pagos, só `{python} n(n_pagos_sem_preco)` (`{python} pct(n_pagos_sem_preco, n_pagos)`) não têm preço. `dlc` (`{python} pct(n_dlc_nulo, n_fichas)`) e `packages` (`{python} pct(n_pkg_nulo, n_fichas)`) também só aparecem quando há itens.
+
+**Acurácia.** Aqui o valor existe, mas não diz o que parece. Os `{python} n(n_nao_brl)` preços fora do BRL usam outra escala: *`{python} ex_nome`* veio em `{python} ex_moeda` com `initial` de `{python} ex_initial`. Lido como real, custaria R\$ `{python} ex_falso`; convertido, custa R\$ `{python} ex_brl`. `required_age` vale `"0"` em `{python} n(n_zero)` fichas (`{python} pct(n_zero, n_fichas)`), e a Steam usa esse valor tanto para "livre" quanto para "não declarado": `{python} n(n_zero_dejus)` delas têm classificação do Dejus em `ratings`, e `{python} n(n_zero_sem_entidade)` não têm nenhuma entidade que confirme o zero. `controller_support` só tem `{python} ", ".join(valores_ctrl)` ou nulo, então o nulo carrega significado.
+
+**Consistência.** A chave veio limpa: `{python} n(n_appid_dup)` `appid` repetidos e `{python} n(n_linhas_dup)` linhas inteiras repetidas, as duas contagens iguais. A gratuidade bate com o preço no bruto: `{python} n(n_gratis_com_preco)` jogos gratuitos têm `price_overview`. O tipo não é consistente: `required_age` chega como número em `{python} n(n_idade_num)` fichas e como texto em `{python} n(n_idade_txt)`. `{python} "Todos os números são o zero, e todos os textos são idades declaradas." if zero_so_numero else "O zero aparece nos dois formatos."` E `type` mistura jogo com `{python} n(n_nao_game)` lançamentos de outro tipo.
+
+**Atualidade.** Nenhuma data de lançamento é posterior à coleta (`{python} n(n_futuras)` casos). A mais recente é `{python} data_max.strftime("%d/%m/%Y")` e a mais antiga é de `{python} ano_min`. A idade do jogo pesa nas colunas acumuladas: entre os `{python} n(n_recentes)` jogos de 2021 em diante, `recommendations` falta em `{python} pct(recente["rec_nulo"], 1)`, contra `{python} pct(antigo["rec_nulo"], 1)` até 2010. A mediana de recomendações cai de `{python} n(antigo["rec_mediana"])` para `{python} n(recente["rec_mediana"])`. Já `achievements` faz o caminho inverso: falta em `{python} pct(antigo["ach_nulo"], 1)` dos jogos até 2010, de antes do sistema de conquistas, e em `{python} pct(recente["ach_nulo"], 1)` dos de 2021 em diante.
+
+# As decisões
+
+**Moeda: converter, com taxa declarada.** Descartar os `{python} n(n_nao_brl)` preços fora do BRL tiraria jogos da comparação só por causa da moeda em que a loja respondeu, e mantê-los crus misturaria escalas na coluna que a pergunta usa. Convertemos `initial / 100` com `TAXAS_PARA_BRL` (`{python} n(len(TAXAS_PARA_BRL))` moedas). **As taxas são suposição da equipe**, valores redondos e não a cotação de 03/10/2026, e cada preço convertido leva `preco_convertido = True` (`{python} n(n_convertidos)` no trusted). Moeda fora da tabela não vira real por omissão: vai para a quarentena como `moeda_sem_taxa` (`{python} motivo("moeda_sem_taxa")` nesta coleta). Usamos `initial`, e não `final`, para o desconto do dia não entrar como preço.
+
+**Ausências.** `metacritic` saiu: tem `{python} pct(n_meta_nulo, n_fichas)` de nulo, e a falta sobe de `{python} pct(antigo["meta_nulo"], 1)` nos jogos até 2010 para `{python} pct(recente["meta_nulo"], 1)` nos de 2021 em diante. A ausência acompanha a cobertura da crítica, e imputar inventaria a nota. Preço de jogo gratuito virou 0. `dlc` e `packages` viraram contagem com nulo = 0, porque a API omite o campo quando não há item. `controller_support` nulo virou `sem suporte` (`{python} n(n_sem_suporte)` no trusted). Essa é uma **hipótese da equipe**, que a API não confirma. `recommendations`, `achievements` e o preço dos pagos sem preço receberam a mediana dos jogos dentro do IQR, com coluna `*_imputada` (`{python} n(n_imp_rec)`, `{python} n(n_imp_ach)` e `{python} n(n_imp_preco)` linhas no trusted). O mascaramento do diagnóstico mostra o custo disso: o erro mediano é `{python} n(rec_erro)` recomendações para um valor imputado de `{python} n(rec_est)` (p90 de `{python} n(rec_p90)`), e `{python} num(ach_erro, 0)` conquistas para `{python} num(ach_est, 0)`. A imputação mantém a linha na análise, mas não mede o jogo. Conclusões que dependem do valor exato devem filtrar `*_imputada = False`.
+
+**Faixa etária.** `required_age` passa a vir de `ratings`, com o Dejus primeiro (`{python} n(n_dejus)` linhas no trusted) e outra entidade quando não há Dejus (`{python} n(n_outra_entidade)`, como ESRB e USK). `{python} n(n_entidade_ni)` linha mantém a idade da Steam sem entidade. A coluna `entidade_faixa_etaria` diz de onde veio, porque as escalas não se misturam (ESRB `M` não é `18`).
+
+**Regras de negócio, no nível da tabela.** As três vieram da leitura do próprio dado, não de um manual da Steam:
+
+- `preco_gratuidade_incoerente`: jogo grátis custa zero, e só jogo grátis custa zero. A API separa `is_free` de `price_overview`, e a imputação do preço poderia desalinhar o par.
+- `preco_convertido_e_imputado`: preço imputado não pode estar marcado como convertido de outra moeda, porque ninguém converteu nada.
+- `faixa_etaria_zero_sem_entidade`: `required_age = "0"` só vale se alguma entidade confirma. Sem entidade, o zero é ausência de dado, e classificá-lo como "livre" seria inventar.
+
+**Quarentena, não Fail-Stop.** No nosso domínio, uma demo ou uma ficha vazia no meio do ranking é esperada. Parar o pipeline por ela jogaria fora `{python} n(n_trusted)` jogos válidos para proteger uma análise que nunca incluiria a demo. Por isso cada linha reprovada vai para `data/quarentena/rejeitados.parquet`, com `motivo` e `detectado_em`. Falha de estrutura (coluna faltando ou sobrando) continua parando a execução sem gravar nada, porque aí não há linha para isolar. O resultado desta coleta é `{python} n(n_trusted)` linhas no trusted e `{python} n(n_quarentena)` na quarentena:
+
+```{python}
+# | output: asis
+print("| motivo | linhas |\n|:---|---:|")
+for nome, qtd in motivos.items():
+    print(f"| `{nome}` | {n(qtd)} |")
+```
+
+`not_nullable` são as `{python} n(n_nat)` datas que a API mandou no idioma local (russo, ou português abreviado como `14/fev./2024`) ou vazias (`{python} n(n_nat_vazia)`) e que não viraram data. Elas ficam fora porque `release_date` é obrigatória no contrato. `{python} n(n_q_combinada)` linhas têm mais de um motivo, e a tabela conta cada motivo.
+
+# Onde a equipe travou
+
+- **A lista de IDs.** A primeira versão do `ingest.py` abria o SteamDB num navegador automatizado (CloakBrowser) para raspar o ranking. Isso travava baixando o Chromium e não era reexecutável de forma confiável. Depois do comentário do professor, a lista virou entrada versionada com data no nome, e o script começa nela.
+- **Ritmo das requisições.** A primeira tentativa de paralelizar espaçava cada requisição pelo limite por minuto e, na prática, continuava sequencial. A segunda (limitador com fichas) funcionou, mas ficou difícil de manter, e foi trocada por lotes com pausa fixa entre eles.
+- **Moeda.** No notebook de exploração, uma moeda fora do dicionário recebia taxa 1,0 sem aviso. Na primeira coleta, *Against the Storm* veio em won (KRW) e seria lido como real. Só percebemos olhando esse caso. Daí veio `moeda_sem_taxa`.
+- **Duplicatas.** `drop_duplicates()` na ficha achatada quebrou (`unhashable type: 'list'`), porque gêneros e categorias são listas. A deduplicação passou a ser por `appid`.
+- **Sem resposta satisfatória.** As taxas de câmbio são fixas e arbitrárias. A imputação por mediana tem erro da ordem do próprio valor. As `{python} n(n_nat - n_nat_vazia)` datas em idioma local poderiam ser lidas com um parser por idioma, e ficaram na quarentena. O carimbo `coletado_em` vem da data da lista (`{python} coleta_txt`), não do dia da consulta (05/10/2026), e um relatório sobre uma fonte viva precisaria dos dois.
+
+# Uso de IA
+
+- Para **gerar e formatar esse documento** e o `diagnostico.qmd`.
+- Para reforçar mecanismo de coleta em **ingest.py**.
+- Para compreensão das bibliotecas utilizadas (pandera e DuckDB).
+- Para investigação das APIs da Steam.

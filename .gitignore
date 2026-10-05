@@ -20,3 +20,5 @@ data/trusted/*
 data/quarentena/*
 
 .docs
+/.quarto/
+**/*.quarto_ipynb
