@@ -194,7 +194,7 @@ def motivo(nome: str) -> str:
 n_q_combinada = int(quarentena["motivo"].astype(str).str.contains(", ").sum())
 ```
 
-**Integrantes.** José Carlos — matrícula · Rudney Gabriel — matrícula
+**Integrantes.** José Carlos — 20231SI0003 · Rudney Gabriel — matrícula
 
 **Coleta analisada.** Lista de IDs de `{python} coleta_txt` (carimbo `coletado_em`), consultada na Steam em 05/10/2026. `{python} n(n_registros)` registros em `data/raw/steam-appdetails.jsonl`.
 
