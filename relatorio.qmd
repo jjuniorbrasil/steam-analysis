@@ -194,15 +194,17 @@ def motivo(nome: str) -> str:
 n_q_combinada = int(quarentena["motivo"].astype(str).str.contains(", ").sum())
 ```
 
-**Integrantes.** José Carlos — 20231SI0003 · Rudney Gabriel — matrícula
+**Integrantes.** José Carlos Chaves Brasil Júnior — 20231SI0003 · Rudney Gabriel Gonçalves Fonseca — 20231SI0025
 
 **Coleta analisada.** Lista de IDs de `{python} coleta_txt` (carimbo `coletado_em`), consultada na Steam em 05/10/2026. `{python} n(n_registros)` registros em `data/raw/steam-appdetails.jsonl`.
 
 # A fonte e a coleta
 
-A fonte é a API pública [`appdetails`](https://store.steampowered.com/api/appdetails) da Steam Store, sem chave nem cadastro. A pergunta que orienta o recorte: **entre os jogos mais bem avaliados da Steam, o preço em reais, a gratuidade e o rótulo indie acompanham o volume de recomendações?** Ela pede preço comparável, tipo de lançamento, gêneros e recomendações, e é isso que o contrato guarda.
+A fonte é a API pública [`appdetails`](https://store.steampowered.com/api/appdetails) da Steam Store, sem chave nem cadastro. A pergunta, como fechada com o professor: **qual a proporção de jogos indies no ranking dos mais bem avaliados da Steam, e em que posições eles aparecem em relação aos demais?** "Classificação" aqui é a posição no ranking, não nota nem faixa etária. "Indie" é o gênero que o próprio desenvolvedor declara em `genres`. A pergunta pede o gênero, a posição e o tipo de lançamento (só `game` entra), e o contrato guarda também preço e recomendações para comparar os grupos.
 
-Quais jogos consultar é uma entrada, não uma etapa do script: `data/raw/ids-steamdb-20261003.csv` guarda os 5.000 primeiros da página [Top Rated](https://steamdb.info/stats/gameratings/?min_reviews=500) do SteamDB (pelo menos 500 avaliações), salva no navegador em 03/10/2026. O `ingest.py` consulta os primeiros `TARGET_APPS=1000`, na ordem do arquivo.
+Quais jogos consultar é uma entrada, não uma etapa do script: `data/raw/ids-steamdb-20261003.csv` guarda os 5.000 primeiros da página [Top Rated](https://steamdb.info/stats/gameratings/?min_reviews=500) do SteamDB (pelo menos 500 avaliações), salva no navegador em 03/10/2026. O SteamDB bloqueia acesso por script (403), por isso a lista foi tirada à mão. A posição de cada jogo é a ordem da linha no arquivo. O `ingest.py` consulta os primeiros `TARGET_APPS=1000`, ou seja, as posições 1 a 1.000.
+
+**Limitação.** O ranking muda o tempo todo. Os jogos analisados são os mais bem avaliados em 03/10/2026, não em geral, e uma lista tirada em outro dia traria outro universo.
 
 Vieram `{python} n(n_registros)` registros, um por `appid`. `{python} n(n_fichas)` trazem ficha (`success=true`) e `{python} n(n_sem_ficha)` vieram vazios. Três coisas surpreenderam:
 
@@ -224,7 +226,7 @@ Os percentuais abaixo são sobre as `{python} n(n_fichas)` fichas, salvo quando 
 
 # As decisões
 
-**Moeda: converter, com taxa declarada.** Descartar os `{python} n(n_nao_brl)` preços fora do BRL tiraria jogos da comparação só por causa da moeda em que a loja respondeu, e mantê-los crus misturaria escalas na coluna que a pergunta usa. Convertemos `initial / 100` com `TAXAS_PARA_BRL` (`{python} n(len(TAXAS_PARA_BRL))` moedas). **As taxas são suposição da equipe**, valores redondos e não a cotação de 03/10/2026, e cada preço convertido leva `preco_convertido = True` (`{python} n(n_convertidos)` no trusted). Moeda fora da tabela não vira real por omissão: vai para a quarentena como `moeda_sem_taxa` (`{python} motivo("moeda_sem_taxa")` nesta coleta). Usamos `initial`, e não `final`, para o desconto do dia não entrar como preço.
+**Moeda: converter, com taxa declarada.** Descartar os `{python} n(n_nao_brl)` preços fora do BRL tiraria jogos da comparação só por causa da moeda em que a loja respondeu, e mantê-los crus misturaria escalas na coluna usada para comparar indies e demais. Convertemos `initial / 100` com `TAXAS_PARA_BRL` (`{python} n(len(TAXAS_PARA_BRL))` moedas). **As taxas são suposição da equipe**, valores redondos e não a cotação de 03/10/2026, e cada preço convertido leva `preco_convertido = True` (`{python} n(n_convertidos)` no trusted). Moeda fora da tabela não vira real por omissão: vai para a quarentena como `moeda_sem_taxa` (`{python} motivo("moeda_sem_taxa")` nesta coleta). Usamos `initial`, e não `final`, para o desconto do dia não entrar como preço.
 
 **Ausências.** `metacritic` saiu: tem `{python} pct(n_meta_nulo, n_fichas)` de nulo, e a falta sobe de `{python} pct(antigo["meta_nulo"], 1)` nos jogos até 2010 para `{python} pct(recente["meta_nulo"], 1)` nos de 2021 em diante. A ausência acompanha a cobertura da crítica, e imputar inventaria a nota. Preço de jogo gratuito virou 0. `dlc` e `packages` viraram contagem com nulo = 0, porque a API omite o campo quando não há item. `controller_support` nulo virou `sem suporte` (`{python} n(n_sem_suporte)` no trusted). Essa é uma **hipótese da equipe**, que a API não confirma. `recommendations`, `achievements` e o preço dos pagos sem preço receberam a mediana dos jogos dentro do IQR, com coluna `*_imputada` (`{python} n(n_imp_rec)`, `{python} n(n_imp_ach)` e `{python} n(n_imp_preco)` linhas no trusted). O mascaramento do diagnóstico mostra o custo disso: o erro mediano é `{python} n(rec_erro)` recomendações para um valor imputado de `{python} n(rec_est)` (p90 de `{python} n(rec_p90)`), e `{python} num(ach_erro, 0)` conquistas para `{python} num(ach_est, 0)`. A imputação mantém a linha na análise, mas não mede o jogo. Conclusões que dependem do valor exato devem filtrar `*_imputada = False`.
 
@@ -257,7 +259,7 @@ for nome, qtd in motivos.items():
 
 # Uso de IA
 
-- Para **gerar e formatar esse documento** e o `diagnostico.qmd`.
-- Para reforçar mecanismo de coleta em **ingest.py**.
-- Para compreensão das bibliotecas utilizadas (pandera e DuckDB).
-- Para investigação das APIs da Steam.
+- Claude: Para **gerar e formatar esse documento** e o `diagnostico.qmd`.
+- Claude: Para reforçar mecanismo de coleta em **ingest.py**.
+- Claude: Para compreensão das bibliotecas utilizadas (pandera e DuckDB).
+- Claude: Para investigação das APIs da Steam.
