@@ -36,6 +36,10 @@ TRUSTED = Path("data/trusted/jogos.parquet")
 QUARENTENA = Path("data/quarentena/rejeitados.parquet")
 DATA_COLETA = pd.Timestamp("2026-10-03")
 
+# required_age da Steam vem "0" quando ninguém declarou idade; trato como ausência.
+IDADES_SEM_VALOR = {"", "0"}
+ENTIDADE_NAO_INFORMADA = "não informado"
+
 CONTRATO = DataFrameSchema(
     {
         "appid": Column(str, nullable=False, unique=True),
@@ -194,10 +198,6 @@ def _limpar_idiomas(texto: object) -> str:
     sem_html = re.sub(r"<[^>]*>", "", texto)
     return re.sub(r"\s*\*+", "", sem_html).strip()
 
-
-# required_age da Steam vem "0" quando ninguém declarou idade; trato como ausência.
-IDADES_SEM_VALOR = {"", "0"}
-ENTIDADE_NAO_INFORMADA = "não informado"
 
 
 def _avaliacoes(ratings: object) -> dict[str, str]:

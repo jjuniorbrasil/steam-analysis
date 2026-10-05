@@ -1,0 +1,436 @@
+---
+title: "Diagnóstico dos dados da raw"
+subtitle: "Introdução à Ciência de Dados · steam_analysis"
+author: "José Carlos e Rudney Gabriel"
+date: 05/10/2026
+lang: pt-BR
+format:
+  html:
+    toc: true
+    code-fold: false
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+---
+
+<!--
+COMO RODAR
+
+Coloque este arquivo na raiz do projeto . O dado é data/raw/steam-appdetails.jsonl, gerado pelo ingest.py.
+
+    uv add duckdb pandas pyarrow pandera
+    uv add --dev jupyter missingno
+    uv run quarto render diagnostico.qmd
+
+As seções 4 e 5 importam as funções do transform.py, para o diagnóstico
+descrever exatamente o que o pipeline faz, sem uma segunda versão das regras.
+-->
+
+## Contexto
+
+O dado vem da API `appdetails` da loja Steam, coletada por `ingest.py` a partir da
+lista de IDs `ids-steamdb-AAAAMMDD.csv` (1.000 IDs). Cada linha do JSONL é um
+envelope (`fonte`, `coletado_em`, `appid`, `success`) com a ficha do jogo em `data`.
+
+Das dezenas de campos da ficha, o projeto fica com 17 colunas: `type`, `name`,
+`required_age`, `is_free`, `controller_support`, `developers`, `publishers`,
+`pc_requirements`, `price_overview`, `categories`, `genres`,
+`recommendations`, `achievements` (total), `release_date`,
+`supported_languages`, `dlc` e `packages`. .
+
+```{python}
+# | label: setup
+import json
+import sys
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+
+pd.set_option("display.width", 120)
+pd.set_option("display.max_columns", 40)
+
+BRUTO = Path("data/raw/steam-appdetails.jsonl")
+if not BRUTO.exists():
+    raise FileNotFoundError("Nenhum data/raw/steam-appdetails.jsonl. Rode o ingest.py antes.")
+
+
+def _total(valor):
+    return valor.get("total") if isinstance(valor, dict) else None
+
+
+def _descricoes(valor):
+    if not isinstance(valor, list):
+        return None
+    nomes = [i["description"] for i in valor if isinstance(i, dict) and i.get("description")]
+    return ", ".join(nomes) or None
+
+
+def _juntar(valor):
+    if not isinstance(valor, list):
+        return None
+    itens = [str(i) for i in valor if str(i).strip()]
+    return ", ".join(itens) or None
+
+
+def _contar(valor):
+    # ausência do campo = None (nulo bruto); lista presente = quantidade de ids
+    return len(valor) if isinstance(valor, list) else None
+
+
+def achatar(ficha: dict) -> dict:
+    """Escalariza a ficha sem corrigir nada."""
+    preco = ficha.get("price_overview")
+    preco = preco if isinstance(preco, dict) else {}
+    ratings = ficha.get("ratings")
+    ratings = ratings if isinstance(ratings, dict) else None
+    pc = ficha.get("pc_requirements")
+    return {
+        "appid": ficha["appid"],
+        "type": ficha.get("type"),
+        "name": ficha.get("name"),
+        # no JSON bruto o 0 vem como número e as demais idades como texto
+        "required_age": None if ficha.get("required_age") is None else str(ficha["required_age"]).strip(),
+        "is_free": ficha.get("is_free"),
+        "controller_support": ficha.get("controller_support"),
+        "developers": _juntar(ficha.get("developers")),
+        "publishers": _juntar(ficha.get("publishers")),
+        "pc_req_minimo": bool(pc.get("minimum")) if isinstance(pc, dict) else None,
+        "preco_initial": preco.get("initial"),
+        "preco_moeda": preco.get("currency"),
+        "metacritic_score": (ficha.get("metacritic") or {}).get("score"),
+        "categories": _descricoes(ficha.get("categories")),
+        "genres": _descricoes(ficha.get("genres")),
+        "recommendations": _total(ficha.get("recommendations")),
+        "achievements": _total(ficha.get("achievements")),
+        "release_date": (ficha.get("release_date") or {}).get("date"),
+        "ratings_dejus": (ratings.get("dejus") or {}).get("rating") if ratings else None,
+        "entidade_faixa_etaria": len(ratings) if ratings else None,
+        "supported_languages": ficha.get("supported_languages"),
+        "dlc_n": _contar(ficha.get("dlc")),
+        "packages_n": _contar(ficha.get("packages")),
+    }
+
+
+fichas, sem_ficha = [], []
+with BRUTO.open(encoding="utf-8") as fh:
+    for linha in fh:
+        if not linha.strip():
+            continue
+        item = json.loads(linha)
+        if item.get("success") and isinstance(item.get("data"), dict):
+            fichas.append(achatar({**item["data"], "appid": str(item["appid"])}))
+        else:
+            sem_ficha.append(str(item.get("appid")))
+
+df = pd.DataFrame(fichas)
+
+# Data lida (formato "10 Oct, 2007"). A API devolve algumas datas no idioma local
+# (russo, chinês); essas não são lidas e viram NaT, e ficam visíveis na seção 1.
+df["release_dt"] = pd.to_datetime(df["release_date"], format="mixed", errors="coerce")
+df["ano"] = df["release_dt"].dt.year
+df["faixa_ano"] = pd.cut(
+    df["ano"], [0, 2010, 2015, 2020, 3000],
+    labels=["1: até 2010", "2: 2011-2015", "3: 2016-2020", "4: 2021 em diante"],
+).astype(object).fillna("5: data não lida")
+
+con = duckdb.connect()
+con.register("jogos", df)
+print(f"lendo: {BRUTO}")
+print(f"fichas com success=true: {len(df)} | sem ficha (success=false): {len(sem_ficha)}")
+```
+
+## 1. Perfil do arquivo bruto
+
+```{python}
+# | label: perfil
+perfil = con.sql("SUMMARIZE SELECT * EXCLUDE (release_dt, ano, faixa_ano) FROM jogos").df()
+perfil[["column_name", "column_type", "count", "approx_unique", "null_percentage", "min", "max"]]
+```
+
+O perfil denuncia seis coisas.
+
+1. **`metacritic_score` com ~70,7% de nulos.** Só jogos que a crítica avaliou têm nota; a coluna é pobre demais para sustentar qualquer análise (decisão na seção 3).
+2. **`required_age` tem 75,4% de valores `'0'`.** A Steam usa `0` tanto para "livre" quanto para "ninguém declarou"; na prática é um nulo disfarçado. Além disso, o JSON mistura tipos: o `0` vem como número e as demais idades como texto (`"14"`, `"18"`), então a coluna só vira texto uniforme depois de normalizada.
+3. **`release_date` veio `VARCHAR` e 20 datas não são lidas**: a API devolveu a data no idioma local (por exemplo `13 мая. 2020 г.`, `2019 年 1 月 24 日`). Sem tratamento viram `NaT` e quebram o contrato de `release_date` do `transform.py`.
+4. **`preco_initial` mistura moedas e escalas.** Está em centavos da moeda local: o máximo (12.900.000) está a quatro ordens de grandeza da mediana (~3.579). Só dá para comparar depois da conversão para BRL; `preco_moeda` mostra que 19 moedas aparecem na coleta.
+5. **`controller_support` tem um único valor distinto (`full`) e 53,5% de nulos.** Só existe `full` ou ausente;
+
+Também há **51 registros de `type` diferente de `game`** (demo, dlc, mod, video, series, music), que o contrato do `transform.py` não aceita.
+
+```{python}
+# | label: tipos
+con.sql("SELECT type, count(*) AS registros FROM jogos GROUP BY 1 ORDER BY 2 DESC").df()
+```
+
+## 2. Duplicatas
+
+```{python}
+# | label: duplicatas
+CHAVE = "appid"
+base = df.drop(columns=["release_dt", "ano", "faixa_ano"])
+
+dup_linha = int(base.duplicated().sum())
+dup_chave = int(base.duplicated(subset=CHAVE).sum())
+print(f"linhas com ficha: {len(base)}  (mais {len(sem_ficha)} sem ficha, no total de 1000 coletadas)")
+print(f"duplicadas por linha inteira: {dup_linha}")
+print(f"duplicadas por {CHAVE}: {dup_chave}")
+```
+
+As duas contagens coincidem (zero), então não há registro repetido nem registro com a mesma
+chave e conteúdo divergente. Isso é coerente com o `ingest.py`, que só grava `appid` ainda não
+salvo, e com o `drop_duplicates(subset=["appid"])` de `carregar()` no `transform.py`, que fica como
+proteção caso o JSONL seja concatenado no futuro.
+
+```{python}
+# | label: dedup
+antes = len(df)
+df = df.drop_duplicates(subset=[CHAVE]).reset_index(drop=True)
+print(f"{antes} -> {len(df)} linhas apos remover cópias exatas")
+assert len(df) == 997, "contagem apos dedup mudou"
+assert len(sem_ficha) == 3, "número de IDs sem ficha mudou"
+con.register("jogos", df)
+```
+
+As 3 fichas `success=false` não são duplicatas: o ID existe na lista, mas a API não devolveu dados. Elas
+vão para a quarentena com o motivo `sem_ficha` (seção 5).
+
+## 3. Tabela de decisão
+
+```{python}
+# | label: ausencia-por-coluna
+ausencia = (df.drop(columns=["release_dt", "ano", "faixa_ano"]).isna().mean() * 100).round(1)
+ausencia[ausencia > 0].sort_values(ascending=False).to_frame("pct_nulo")
+```
+
+Para classificar o mecanismo de ausência usamos uma consulta de apoio: ela compara a taxa de nulo
+da coluna entre grupos (tipo, ano de lançamento, gratuidade).
+
+```{python}
+# | label: padrao-de-ausencia
+def ausencia_por(coluna: str, grupo: str):
+    return con.sql(f"""
+        SELECT {grupo} AS grupo,
+               count(*) AS registros,
+               count(*) FILTER (WHERE {coluna} IS NULL) AS ausentes,
+               round(100.0 * count(*) FILTER (WHERE {coluna} IS NULL) / count(*), 1) AS pct
+        FROM jogos GROUP BY 1 ORDER BY 1
+    """).df()
+
+# metacritic: a taxa de nulo sobe com o ano de lançamento
+ausencia_por("metacritic_score", "faixa_ano")
+```
+
+```{python}
+# | label: padrao-controller
+# controller_support: a taxa é parecida em todos os grupos (sem padrão)
+pd.concat(
+    {"por faixa_ano": ausencia_por("controller_support", "faixa_ano"),
+     "por type": ausencia_por("controller_support", "type")}
+)
+```
+
+```{python}
+# | label: padrao-preco
+# preço: nulo é 100% dos jogos gratuitos e quase nada entre os pagos
+pd.concat(
+    {"por is_free": ausencia_por("preco_initial", "is_free"),
+     "pagos, por type": con.sql("""
+        SELECT type AS grupo, count(*) AS registros,
+               count(*) FILTER (WHERE preco_initial IS NULL) AS ausentes,
+               round(100.0 * count(*) FILTER (WHERE preco_initial IS NULL) / count(*), 1) AS pct
+        FROM jogos WHERE NOT is_free GROUP BY 1 ORDER BY 1""").df()}
+)
+```
+
+
+```{python}
+# | label: padrao-dlc-packages
+# dlc e packages: o campo só existe quando há itens
+pd.concat(
+    {"dlc": ausencia_por("dlc_n", "type"),
+     "packages": ausencia_por("packages_n", "type")}
+)
+```
+
+```{python}
+# | label: padrao-required-age
+# required_age = '0' (nulo disfarçado): quantos têm outra fonte de idade em ratings?
+con.sql("""
+    SELECT required_age = '0' AS idade_zero,
+           ratings_dejus IS NOT NULL AS tem_dejus,
+           entidade_faixa_etaria IS NOT NULL AS tem_alguma_entidade,
+           count(*) AS registros
+    FROM jogos GROUP BY ALL ORDER BY ALL
+""").df()
+```
+
+| coluna | % ausente | tipo (MCAR/MAR/MNAR) | estratégia | justificativa |
+|:---|---:|:---|:---|:---|
+| `metacritic_score` | 70,7 | MNAR | **apagar a coluna** | Só aparece quando a crítica avaliou o jogo. A consulta por `faixa_ano` mostra 20% de nulo até 2010 e 84% de 2021 em diante, então a ausência acompanha o próprio fenômeno (cobertura da crítica), e a coluna é pobre demais para imputar. |
+| `controller_support` | 53,5 | MNAR (estrutural) | recodificar nulo como `sem suporte` | Só existem `full` e nulo. A taxa de nulo fica entre 50% e 62% em todos os anos e tipos, sem padrão. **Hipótese da equipe:** nulo = sem suporte a controle, porque a API omite o campo quando não há suporte. Não temos como confirmar fora da API. |
+| `preco_initial` (`price_overview`) | 21,7 | estrutural + MAR | gratuitos: preço 0. Pagos sem preço: mediana com indicador `price_brl_imputada` | Os 194 jogos com `is_free=True` têm 100% de nulo; entre os 803 pagos são só 2,7% (22 registros). O nulo dos gratuitos é ausência estrutural, e usamos o `initial` por ser o preço sem desconto. |
+| `recommendations` | 17,5 | MAR | mediana de jogos dentro do IQR, com indicador | Nulo vai de 0% (até 2010) a 24% (2021 em diante); jogos novos ainda não acumularam recomendações. Depende de uma coluna observada (ano e tipo). |
+| `achievements` | 20,2 | MAR | mediana de jogos dentro do IQR, com indicador | Padrão inverso: 49% de nulo até 2010 e 17% de 2021 em diante (jogos antigos não tinham sistema de conquistas). Também depende de ano e tipo. |
+| `dlc` | 45,5 | estrutural | guardar a quantidade de ids, nulo = 0 | A API só traz o campo quando há DLC. Nulo significa "nenhum", não "desconhecido". |
+| `packages` | 20,1 | estrutural | guardar a quantidade de ids, nulo = 0 | Idem `dlc`. |
+| `required_age` | 75,4 (valor `'0'`) | MAR | preencher a partir de `ratings` (prioridade `dejus`) | 695 dos 752 registros com `'0'` têm avaliação do `dejus`; só 57 não têm. A faixa vem de outra coluna observada. Quando nenhuma entidade confirma o `'0'`, ele é ausência de dado, e o contrato reprova (`faixa_etaria_zero_sem_entidade`). |
+| `ratings` | 2,2 | MAR | usado só para preencher `required_age`; a coluna sai | Depois da extração a coluna original não é mais necessária. |
+| `publishers`, `categories`, `genres`, `supported_languages` | < 1 | MCAR (provável) | `categories`, `genres`, `publishers`: manter vazio; `supported_languages`: `Não informado` | Percentuais pequenos demais para sustentar uma consulta com poder de distinguir mecanismos. |
+
+## 4. Tratamento
+
+A descrição reaproveita as funções do `transform.py`. A ordem é: extremos primeiro (a imputação usa a mediana dentro do IQR), depois imputação com
+indicador por coluna.
+
+```{python}
+# | label: tratamento
+sys.path.insert(0, "./src")
+from transform import (  
+    ENTIDADE_NAO_INFORMADA,
+    _mediana_dentro_do_iqr,
+    carregar,
+    higienizar,
+    tratar,
+)
+
+fichas_t, sem_ficha_t = carregar(BRUTO)
+higienizado = higienizar(fichas_t)
+tratado, sem_taxa = tratar(higienizado)
+
+# imputação sem sobras e com indicador
+for coluna in ("achievements", "recommendations", "price_brl"):
+    assert tratado[coluna].notna().all(), f"{coluna} ainda tem nulo"
+    assert f"{coluna}_imputada" in tratado.columns
+assert tratado["controller_support"].isin(["full", "sem suporte"]).all()
+assert tratado["dlc"].ge(0).all() and tratado["packages"].ge(0).all()
+
+# preço: gratuito custa zero (e só gratuito custa zero)
+assert (tratado["is_free"] == (tratado["price_brl"] == 0)).all()
+
+# imputado nunca é convertido de outra moeda
+assert not (tratado["preco_convertido"] & tratado["price_brl_imputada"]).any()
+
+print(f"fichas: {len(fichas_t)} | sem ficha: {len(sem_ficha_t)} | sem taxa de câmbio: {len(sem_taxa)}")
+tratado[["achievements_imputada", "recommendations_imputada", "price_brl_imputada"]].sum().to_frame("imputados")
+```
+
+
+
+**Faixa etária: atenção às categorias e pluralidade de entidades.** A coluna `ratings` traz faixas de entidades diferentes que não usam a mesma escala numérica. Optamos por preservá-las guardando a origem na coluna `entidade_faixa_etaria`, priorizando o *dejus* quando disponível. Veja a distribuição resultante:
+
+```{python}
+# | label: faixas-etarias
+(
+    tratado.groupby(["required_age", "entidade_faixa_etaria"])
+    .size()
+    .rename("registros")
+    .reset_index()
+    .sort_values(["entidade_faixa_etaria", "registros"], ascending=[True, False])
+)
+```
+
+O `dejus` cobre quase tudo e usa `L`, `6`, `10`, `12`, `14`, `16`, `18`. O restante vem de outras entidades e
+carrega categorias que não se misturam com a escala numérica brasileira: `ESRB` (`M`, `T`, `E10`), `17` e,
+em 26 registros, nenhuma entidade (`não informado`).
+
+```{python}
+# | label: faixas-assert
+# Validações estruturais da coexistência das faixas e suas respectivas entidades
+assert tratado["required_age"].notna().all(), "Há valores nulos em required_age após o tratamento"
+assert tratado["entidade_faixa_etaria"].notna().all(), "Há valores nulos na origem da entidade da faixa etária"
+
+print("Contagem de registros por entidade de classificação etária:")
+print(tratado["entidade_faixa_etaria"].value_counts().to_string())
+```
+
+## 5. Quarentena
+
+A política do `transform.py` é quarentena, não parada total: o registro suspeito é isolado com um `motivo`
+e os demais seguem para `data/trusted/`. Quando falta coluna ou sobra coluna a execução para, porque não há
+registro para isolar.
+
+```{python}
+# | label: quarentena
+from transform import validar  # noqa: E402
+
+aprovado, reprovado = validar(tratado)
+rejeitado = pd.concat(
+    [sem_ficha_t, sem_taxa.assign(motivo="moeda_sem_taxa") if len(sem_taxa) else sem_taxa, reprovado],
+    ignore_index=True,
+)
+
+print(f"aprovados: {len(aprovado)} | em quarentena: {len(rejeitado)}")
+(
+    rejeitado["motivo"]
+    .str.split(", ")
+    .explode()
+    .value_counts()
+    .rename_axis("motivo")
+    .to_frame("registros")
+)
+```
+
+Cada motivo tem uma causa identificável:
+
+- **`sem_ficha` (3):** a API respondeu `success=false`.
+- **`type_fora_dominio` (51):** demo, dlc, mod, video, series e music. O projeto analisa jogos (`type = game`).
+- **`faixa_etaria_zero_sem_entidade` (24):** `required_age = 0` sem nenhuma entidade que confirme. É ausência de dado, não "livre".
+- **`moeda_sem_taxa`:** só aparece se uma moeda não estiver em `TAXAS_PARA_BRL`; não convertemos por omissão.
+
+
+## 6. Erro da imputação, por mascaramento
+
+Escondemos uma amostra dos valores **presentes**, imputamos com a mesma regra da seção 4
+(`mediana dentro do IQR` dos jogos) e comparamos com o valor escondido. A amostra mascarada imita o padrão
+real da ausência: em cada faixa de ano escondemos a mesma fração que, na prática, falta naquela faixa
+(em vez de uma fração uniforme). A estimativa só vale sob a hipótese MAR.
+
+```{python}
+# | label: mascaramento
+jogos_pre = higienizado[higienizado["type"] == "game"].copy()
+anos = jogos_pre["release_date"].dt.year
+jogos_pre["faixa_ano"] = pd.cut(
+    anos, [0, 2010, 2015, 2020, 3000], labels=["a", "b", "c", "d"]
+).astype(object).fillna("e")
+
+
+def mascarar(coluna: str, semente: int = 42) -> dict:
+    taxa = jogos_pre.groupby("faixa_ano")[coluna].apply(lambda s: s.isna().mean()).fillna(0)
+    observados = jogos_pre[jogos_pre[coluna].notna()]
+    mascarados = pd.concat(
+        [g.sample(frac=min(taxa[k], 1.0), random_state=semente) for k, g in observados.groupby("faixa_ano")]
+    )
+    estimado = _mediana_dentro_do_iqr(observados.drop(index=mascarados.index)[coluna])
+    erro = (estimado - mascarados[coluna]).abs()
+    return {
+        "coluna": coluna,
+        "n_mascarados": len(mascarados),
+        "valor_imputado": round(estimado, 1),
+        "mediana_do_valor_escondido": float(mascarados[coluna].median()),
+        "erro_mediano": float(erro.median()),
+        "erro_p90": round(float(erro.quantile(0.9)), 1),
+    }
+
+
+pd.DataFrame([mascarar("recommendations"), mascarar("achievements")]).set_index("coluna")
+```
+
+O erro mediano é grande em relação ao que está sendo estimado:
+
+- **`recommendations`:** erro mediano de cerca de 5,7 mil para uma mediana imputada de cerca de 7,9 mil. O erro tem a mesma ordem de grandeza do valor, e o p90 passa de 70 mil.
+- **`achievements`:** erro mediano de cerca de 18 para uma mediana imputada de 27.
+
+Uma única mediana não captura a diferença entre jogos pequenos e grandes. Por isso a imputação serve para
+manter a linha na análise, **não para medir recomendações ou conquistas de um jogo específico**. Essa limitação
+muda a confiança no resultado final: conclusões que dependam do valor exato dessas duas colunas (rankings, correlações finas) devem usar só
+as linhas com `*_imputada = False`.
+
+## Fechamento
+
+No arquivo final, cada coluna numérica imputada (`price_brl`, `recommendations`, `achievements`) tem uma coluna
+`*_imputada` que separa o que foi medido do que foi estimado; `controller_support = sem suporte`, `dlc = 0` e
+`packages = 0` são **leituras do significado do nulo** (hipótese da equipe), não medições. `required_age` mistura entidades
+e escalas diferentes e deve ser lida junto com `entidade_faixa_etaria`. A nota do Metacritic foi descartada por ter ~70%
+de nulo, e o relatório de quarentena lista cada registro que não passou, com o motivo.
