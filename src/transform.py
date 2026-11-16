@@ -42,6 +42,12 @@ ENTIDADE_NAO_INFORMADA = "não informado"
 
 CONTRATO = DataFrameSchema(
     {
+        "rank": Column(
+            int,
+            Check.greater_than_or_equal_to(1, error="rank_invalido"),
+            nullable=False,
+            unique=True,
+        ),
         "appid": Column(str, nullable=False, unique=True),
         "name": Column(str, nullable=False),
         "type": Column(
@@ -139,7 +145,8 @@ def data_da_coleta(path: Path) -> pd.Timestamp:
 def carregar(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Lê o JSONL e separa ficha vazia. Não altera data/raw/."""
     fichas: list[dict] = []
-    sem_ficha: list[str] = []
+    sem_ficha: list[dict] = []
+    posicao = 0
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -148,14 +155,16 @@ def carregar(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
             item = json.loads(line)
             if not isinstance(item, dict):
                 continue
+            posicao += 1
             appid = str(item.get("appid", ""))
             data = item.get("data")
             if item.get("success") and isinstance(data, dict):
                 row = dict(data)
                 row["appid"] = appid
+                row["rank"] = posicao
                 fichas.append(row)
             elif appid:
-                sem_ficha.append(appid)
+                sem_ficha.append({"appid": appid, "rank": posicao})
 
     df = pd.DataFrame(fichas)
     if not df.empty:
@@ -165,7 +174,7 @@ def carregar(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         if removidas:
             print(f"duplicatas removidas: {removidas}")
 
-    quarentena = pd.DataFrame({"appid": sem_ficha, "motivo": "sem_ficha"})
+    quarentena = pd.DataFrame(sem_ficha, columns=["appid", "rank"]).assign(motivo="sem_ficha")
     return df, quarentena
 
 
@@ -259,6 +268,7 @@ def _preco_brl(overview: object) -> tuple[float | None, bool, bool]:
 def higienizar(df: pd.DataFrame) -> pd.DataFrame:
     """Listas viram texto, data vira datetime, preço de tabela vira real."""
     colunas = [
+        "rank",
         "appid",
         "type",
         "name",
@@ -279,6 +289,7 @@ def higienizar(df: pd.DataFrame) -> pd.DataFrame:
         "supported_languages",
     ]
     fora = df.reindex(columns=colunas).copy()
+    fora["rank"] = fora["rank"].astype(int)
     fora["appid"] = fora["appid"].astype(str)
     fora["name"] = fora["name"].map(lambda valor: "" if pd.isna(valor) else str(valor))
     fora["type"] = fora["type"].map(lambda valor: "" if pd.isna(valor) else str(valor))
