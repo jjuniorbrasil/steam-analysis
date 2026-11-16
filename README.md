@@ -17,6 +17,7 @@ uv sync
 uv run python src/ingest.py
 uv run quarto render diagnostico.qmd
 uv run python src/transform.py
+uv run python src/model.py
 ```
 
 Não há chave para copiar. O `.env` é opcional. `TARGET_APPS` (padrão 1000, máximo 5000) define quantos IDs do início do CSV são consultados. `RATE_PER_MINUTE` (padrão 40) é o ritmo global das consultas à Steam. `CONCURRENT_REQUESTS` (padrão 4, máximo 8) manda várias ao mesmo tempo, sem passar desse ritmo.
@@ -30,3 +31,17 @@ Rodar o `ingest.py` de novo não duplica registro. O que já está em `data/raw/
 | `data/raw/steam-appdetails.jsonl` | Resposta do appdetails, um jogo por linha. Recriado pela coleta e fora do Git. |
 | `data/trusted/jogos.parquet` | Jogos que passaram no contrato, gravados por `src/transform.py`. |
 | `data/quarentena/rejeitados.parquet` | Linhas fora do trusted, com o motivo, gravadas por `src/transform.py`. |
+| `data/gold/*.parquet` | Modelo estrela, um arquivo por tabela, gravado por `src/model.py` (tabelas abaixo). Recriado a cada execução e fora do Git. |
+
+## Gold
+
+O `src/model.py` lê só `data/trusted/jogos.parquet`. Ele cria as tabelas em memória, confere as chaves e as somas contra a trusted e só então grava. Se alguma conferência não bater, para com a mensagem e não grava nada em `data/gold/`.
+
+| Tabela | O que é uma linha |
+|---|---|
+| `fato_jogos` | um jogo da lista coletada, com o rank, as recomendações, as conquistas, os DLCs, os pacotes e o preço |
+| `fato_jogos_ano_grupo` | um ano de lançamento e um grupo (indie ou não indie), agregada de `fato_jogos` para a P1 |
+| `dim_data` | um dia, do primeiro ao último lançamento, inclusive os dias sem lançamento |
+| `dim_jogo` | um jogo, com nome, grupo, gratuidade, suporte a controle, desenvolvedoras, publicadoras, gêneros, categorias e idiomas |
+| `dim_faixa_etaria` | uma combinação de faixa etária e entidade classificadora |
+| `dim_qualidade_dado` | uma combinação dos indicadores de preço convertido ou imputado e de recomendações ou conquistas imputadas |
