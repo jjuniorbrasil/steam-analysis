@@ -1,0 +1,246 @@
+---
+title: "Exploração do dado"
+version: "1.1.1"
+subtitle: "Introdução à Ciência de Dados · steam_analysis"
+author: "José Carlos e Rudney Gabriel"
+date: 05/10/2026
+lang: pt-BR
+format:
+  html:
+    toc: true
+    code-fold: false
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  daemon: false
+---
+
+# Preparação: a parte guardada
+
+O dado é o ranking de jogos da Steam (`data/trusted/jogos.parquet`): uma linha por jogo, 906 jogos
+com `rank` de 1 a 1000 (1 é o topo). Como a coleta é um retrato único, a parte guardada **não pode ser
+por tempo**; e cortar por `release_date` seria pior ainda, porque a data é justamente a coluna da P2
+(tirar os jogos mais novos ou mais antigos mudaria a resposta). O corte é então **por sorteio**:
+20% dos jogos (182) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
+
+O sorteio é reproduzível: ordena os jogos por um *hash* do `appid` com uma semente fixa e guarda os
+primeiros 20%. Trocar a semente ou a fração muda o sorteio; 
+
+```{python}
+# | label: setup
+import duckdb
+import numpy as np
+import plotly.express as px
+
+FRACAO_GUARDADA = 0.20            # parte guardada para a confirmação
+SEMENTE = "icd-jogos-1"           # fixa o sorteio;
+CAMINHO = "data/trusted/jogos.parquet" 
+
+con = duckdb.connect()
+n_total = con.execute(f"SELECT COUNT(*) FROM '{CAMINHO}'").fetchall()[0][0]
+n_guardados = int(np.ceil(FRACAO_GUARDADA * n_total))
+
+con.execute(f"""CREATE VIEW jogos AS          -- só a parte da exploração (85%)
+    SELECT * EXCLUDE (ordem) FROM (
+        SELECT *, ROW_NUMBER() OVER (ORDER BY hash(appid::VARCHAR || '-{SEMENTE}')) AS ordem
+        FROM '{CAMINHO}')
+    WHERE ordem > {n_guardados}""")
+con.execute("""CREATE VIEW base AS             -- um jogo por linha, com colunas derivadas
+    SELECT *, YEAR(release_date) AS ano,
+           CASE WHEN Indie THEN 'indie' ELSE 'não indie' END AS grupo,
+           NTILE(5) OVER (ORDER BY release_date) AS quintil_data   -- 5 faixas de datas, da mais antiga à mais nova
+    FROM jogos""")
+con.execute("CREATE VIEW pagos AS SELECT * FROM base WHERE NOT is_free")   # preço > 0
+
+
+n_vistos = con.execute("SELECT COUNT(*) FROM jogos").fetchall()[0][0]
+assert n_vistos == n_total - n_guardados, "o sorteio deixou passar jogos guardados"
+{"jogos no dado": n_total, "guardados": n_guardados, "explorados": n_vistos}
+```
+
+# Bloco 1: perguntas e expectativas
+
+Escritas **antes** de rodar os blocos abaixo (a P3 foi escolhida pela equipe com as colunas
+`recommendations`, `rank` e `Indie`).
+
+| # | Pergunta analítica | Colunas | Expectativa, escrita antes de olhar |
+|:--|:-----------------|:--------------|:-------------------------|
+| P1 | Entre os jogos, qual a proporção de indies e como os preços deles se comparam com os demais? | `Indie`, `price_brl`, `is_free` | indies são a maioria (mais da metade) e mais baratos que os não indies |
+| P2 | Os jogos com data de lançamento mais antiga ocupam os maiores ranks da lista? | `release_date`, `rank` | não: clássicos antigos (da Valve) aparecem no topo, mas são poucos; sem relação geral |
+| P3 | Jogos com mais recomendações ocupam ranks melhores, e isso vale igual para indies e não indies? | `recommendations`, `rank`, `Indie` | sim, relação forte e parecida nos dois grupos |
+
+
+# Bloco 2: primeiro passo, cada coluna sozinha
+
+O que o pipeline marcou na trusted (valores imputados ou convertidos, que pedem cuidado nas contas):
+
+```{python}
+# | label: marcas
+con.sql("""
+    SELECT COUNT(*) AS n_jogos,
+           SUM(price_brl_imputada::INT)        AS preco_imputado,
+           SUM(preco_convertido::INT)          AS preco_convertido,
+           SUM(recommendations_imputada::INT)  AS recomendacoes_imputadas,
+           SUM(achievements_imputada::INT)     AS conquistas_imputadas
+    FROM base
+""").df()
+```
+
+As barras de cada categórica (um jogo por linha, view `base`):
+
+```{python}
+# | label: barras
+cat = con.sql("SELECT grupo, is_free, controller_support, required_age, entidade_faixa_etaria FROM base").df()
+for coluna in ("grupo", "is_free", "controller_support", "required_age", "entidade_faixa_etaria"):
+    px.histogram(cat, y=coluna).update_yaxes(categoryorder="total ascending").show()
+```
+
+Anotações: `Indie` tem 531 jogos contra 239 não indies (o menor grupo tem 239). `is_free` tem 117 jogos
+gratuitos, todos com `price_brl = 0`. `required_age` mistura escalas de classificação etária
+(a coluna `entidade_faixa_etaria` diz de qual órgão vem, e quase tudo é do `dejus`, 743 jogos); por isso
+não comparamos `required_age` entre jogos sem separar a entidade, e as entidades com poucos jogos
+(`usk`, `kgrb`) não sustentam comparação.
+
+As numéricas. O preço tem massa no zero (jogos grátis) e cauda longa; em escala logarítmica, só os pagos:
+
+```{python}
+# | label: forma-preco
+precos = con.sql("SELECT price_brl FROM base").df()
+px.histogram(precos, x="price_brl", nbins=100, title="preço, todos ").show()
+
+pg = con.sql("SELECT price_brl FROM pagos").df()
+px.histogram(pg, x="price_brl", nbins=100, title="só os pagos ").show()
+pg["log_preco"] = np.log10(pg["price_brl"])
+px.histogram(pg, x="log_preco", nbins=30, title="log10 do preço, só pagos").show()
+px.histogram(pg, x="log_preco", nbins=60, title="log10 do preço, só pagos (faixas mais finas)").show()
+
+con.sql("SELECT price_brl, COUNT(*) AS jogos FROM pagos GROUP BY 1 ORDER BY jogos DESC LIMIT 8").df()
+```
+
+Anotação: massa no zero (117 jogos, 15%); entre os pagos, cauda longa à direita (máximo R$ 419,94) e
+picos em poucos valores repetidos (R$ 59,99, 16,99, 32,99, 46,99 são os mais comuns, tabela acima), que as
+faixas finas mostram e as grossas escondem; os picos sugerem faixas fixas de preço (provavelmente convertidas de outra moeda).
+
+As datas, o `rank` e a distribuição de `recommendations` (cauda longa, em escala logarítmica):
+
+```{python}
+# | label: forma-data-rank
+d = con.sql("SELECT release_date, ano, rank, recommendations FROM base").df()
+px.histogram(d, x="ano", nbins=29, title="jogos por ano de lançamento").show()
+px.histogram(d, x="rank", nbins=20, title="rank (só os jogos da exploração)").show()
+d["log_recs"] = np.log10(d["recommendations"])
+px.histogram(d, x="log_recs", nbins=30, title="log10 das recomendações").show()
+con.sql("SELECT ano, COUNT(*) AS jogos FROM base GROUP BY ano ORDER BY ano").df()
+```
+
+Anotações: o `rank` vai de 1 a 1000, sem repetição, com lacunas (770 jogos nesta parte; os outros
+136 estão guardados e 94 posições nunca aparecem no dado pois são os registros quarentenados); a tabela por ano mostra poucos jogos até 2012 e mais volume
+de 2016 em diante; `recommendations` tem cauda longa (de 108 a 1,1 milhão) e um pico só em escala log.
+
+# Bloco 3: P1, do segundo passo ao quarto
+
+## Duas colunas
+
+```{python}
+# | label: p1-proporcao
+con.sql("""
+    SELECT grupo, COUNT(*) AS n_jogos, ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
+    FROM base GROUP BY grupo ORDER BY n_jogos DESC
+""").df()
+```
+
+```{python}
+# | label: p1-preco
+con.sql("""
+    SELECT grupo,
+           ROUND(MEDIAN(price_brl), 2)                             AS mediana_todos,
+           ROUND(AVG(price_brl), 2)                                AS media_todos,
+           ROUND(MEDIAN(price_brl) FILTER (WHERE NOT is_free), 2)  AS mediana_pagos,
+           ROUND(AVG(price_brl)    FILTER (WHERE NOT is_free), 2)  AS media_pagos,
+           ROUND(100 * AVG(is_free::INT), 1)                       AS percent_gratis,
+           MAX(price_brl)                                          AS preco_maximo
+    FROM base GROUP BY grupo ORDER BY grupo
+""").df()
+```
+
+```{python}
+# | label: p1-boxplot
+px.box(con.sql("SELECT grupo, price_brl FROM pagos").df(), x="grupo", y="price_brl", log_y=True,
+       title="preço dos jogos pagos")
+```
+
+As rivais de duas colunas: a massa de jogos grátis (puxa a mediana de "todos" para baixo) e as faixas de preço.
+
+```{python}
+# | label: p1-faixas
+faixas = con.sql("""
+    SELECT grupo,
+           CASE WHEN price_brl = 0 THEN '1 grátis' WHEN price_brl < 20 THEN '2 até R$ 20'
+                WHEN price_brl < 40 THEN '3 R$ 20 a 40' WHEN price_brl < 80 THEN '4 R$ 40 a 80'
+                ELSE '5 R$ 80 ou mais' END AS faixa
+    FROM base""").df()
+px.histogram(faixas.sort_values("faixa"), x="faixa", color="grupo", barmode="group", barnorm="percent")
+```
+
+## Uma terceira coluna
+
+Duas rivais: (1) o preço convertido de outra moeda e o imputado, que podem distorcer; (2) a idade do jogo,
+já que os indies podem ser mais novos.
+
+```{python}
+# | label: p1-convertido
+con.sql("""
+    SELECT grupo, preco_convertido, COUNT(*) AS n_pagos, ROUND(MEDIAN(price_brl), 2) AS mediana_pagos
+    FROM pagos GROUP BY ALL ORDER BY grupo, preco_convertido
+""").df()
+```
+
+```{python}
+# | label: p1-sem-convertido
+con.sql("""
+    SELECT grupo, COUNT(*) AS n_pagos, ROUND(MEDIAN(price_brl), 2) AS mediana_pagos,
+           ROUND(QUANTILE_CONT(price_brl, 0.25), 2) AS q1, ROUND(QUANTILE_CONT(price_brl, 0.75), 2) AS q3
+    FROM pagos WHERE NOT preco_convertido AND NOT price_brl_imputada
+    GROUP BY grupo ORDER BY grupo
+""").df()
+```
+
+```{python}
+# | label: p1-quintil
+con.sql("""
+    SELECT quintil_data, MIN(release_date)::DATE AS de, MAX(release_date)::DATE AS ate,
+           COUNT(*) AS n_jogos,
+           ROUND(100 * AVG(Indie::INT)) AS pct_indie,
+           ROUND(100 * AVG(is_free::INT)) AS pct_gratis,
+           ROUND(MEDIAN(price_brl) FILTER (WHERE Indie AND NOT is_free), 2)     AS mediana_indie_pago,
+           ROUND(MEDIAN(price_brl) FILTER (WHERE NOT Indie AND NOT is_free), 2) AS mediana_nao_indie_pago
+    FROM base GROUP BY quintil_data ORDER BY quintil_data
+""").df()
+```
+
+## A tabela cruzada
+
+```{python}
+# | label: p1-cruzada
+con.sql("""
+    SELECT grupo, quintil_data,
+           COUNT(*) AS n_jogos,
+           COUNT(*) FILTER (WHERE NOT is_free) AS n_pagos,
+           ROUND(MEDIAN(price_brl) FILTER (WHERE NOT is_free), 2) AS mediana_pagos
+    FROM base GROUP BY ALL ORDER BY quintil_data, grupo
+""").df()
+```
+
+**Leitura da P1.** Os indies são **531 de 770 jogos (69,0%)**, mais que o dobro dos não indies (239),
+o que sustenta a expectativa. No preço, a mediana dos indies é **R$ 29,99** contra **R$ 45,96** dos
+demais (todos os jogos); entre os **pagos**, **R$ 37,49 contra R$ 50,00** (média R$ 44,33 contra
+R$ 82,15, puxada pela cauda mais longa dos não indies, de máximo R$ 419,94 contra R$ 207,96). Há mais jogos
+grátis entre os indies (18,3% contra 8,4%), então a diferença não é só questão de "ser pago".
+
+O que cada rival eliminou. Tirar os grátis **não** apaga a diferença (os indies seguem mais baratos entre
+os pagos). Tirar os preços convertidos de outra moeda e os imputados **mantém** a diferença (mediana
+R$ 34,99 contra R$ 47,49), mas os preços convertidos são bem mais altos (R$ 86,72 entre indies e
+R$ 159,96 entre não indies) e merecem investigação. A idade do jogo **não** explica sozinha: em cada
+quintil de datas a mediana paga do indie fica abaixo da do não indie, com diferença pequena na faixa mais
+antiga (R$ 29,99 contra R$ 33,99) e grande nas do meio. 

@@ -188,12 +188,11 @@ proteção caso o JSONL seja concatenado no futuro.
 antes = len(df)
 df = df.drop_duplicates(subset=[CHAVE]).reset_index(drop=True)
 print(f"{antes} -> {len(df)} linhas apos remover cópias exatas")
-assert len(df) == 997, "contagem apos dedup mudou"
-assert len(sem_ficha) == 3, "número de IDs sem ficha mudou"
+assert len(df) == len(base), "existem duplicatas por appid"
 con.register("jogos", df)
 ```
 
-As 3 fichas `success=false` não são duplicatas: o ID existe na lista, mas a API não devolveu dados. Elas
+As fichas `success=false` não são duplicatas: o ID existe na lista, mas a API não devolveu dados. Elas
 vão para a quarentena com o motivo `sem_ficha` (seção 5).
 
 ## 3. Tabela de decisão
