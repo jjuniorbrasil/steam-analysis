@@ -3,7 +3,7 @@ title: "Exploração do dado"
 version: "1.1.1"
 subtitle: "Introdução à Ciência de Dados · steam_analysis"
 author: "José Carlos e Rudney Gabriel"
-date: 05/10/2026
+date: 18/11/2026
 lang: pt-BR
 format:
   html:
@@ -96,9 +96,9 @@ for coluna in ("grupo", "is_free", "controller_support", "required_age", "entida
     px.histogram(cat, y=coluna).update_yaxes(categoryorder="total ascending").show()
 ```
 
-Anotações: `Indie` tem 531 jogos contra 239 não indies (o menor grupo tem 239). `is_free` tem 117 jogos
+Anotações: `Indie` tem 500 jogos contra 224 não indies (o menor grupo tem 224). `is_free` tem 114 jogos
 gratuitos, todos com `price_brl = 0`. `required_age` mistura escalas de classificação etária
-(a coluna `entidade_faixa_etaria` diz de qual órgão vem, e quase tudo é do `dejus`, 743 jogos); por isso
+(a coluna `entidade_faixa_etaria` diz de qual órgão vem, e quase tudo é do `dejus`, 701 jogos); por isso
 não comparamos `required_age` entre jogos sem separar a entidade, e as entidades com poucos jogos
 (`usk`, `kgrb`) não sustentam comparação.
 
@@ -118,8 +118,8 @@ px.histogram(pg, x="log_preco", nbins=60, title="log10 do preço, só pagos (fai
 con.sql("SELECT price_brl, COUNT(*) AS jogos FROM pagos GROUP BY 1 ORDER BY jogos DESC LIMIT 8").df()
 ```
 
-Anotação: massa no zero (117 jogos, 15%); entre os pagos, cauda longa à direita (máximo R$ 419,94) e
-picos em poucos valores repetidos (R$ 59,99, 16,99, 32,99, 46,99 são os mais comuns, tabela acima), que as
+Anotação: massa no zero (114 jogos, 16%); entre os pagos, cauda longa à direita (máximo R$ 419,94) e
+picos em poucos valores repetidos (R$ 59,99, 46,99, 16,99 e 32,99 são os mais comuns, tabela acima), que as
 faixas finas mostram e as grossas escondem; os picos sugerem faixas fixas de preço (provavelmente convertidas de outra moeda).
 
 As datas, o `rank` e a distribuição de `recommendations` (cauda longa, em escala logarítmica):
@@ -134,8 +134,8 @@ px.histogram(d, x="log_recs", nbins=30, title="log10 das recomendações").show(
 con.sql("SELECT ano, COUNT(*) AS jogos FROM base GROUP BY ano ORDER BY ano").df()
 ```
 
-Anotações: o `rank` vai de 1 a 1000, sem repetição, com lacunas (770 jogos nesta parte; os outros
-136 estão guardados e 94 posições nunca aparecem no dado pois são os registros quarentenados); a tabela por ano mostra poucos jogos até 2012 e mais volume
+Anotações: o `rank` vai de 1 a 1000, sem repetição, com lacunas (724 jogos nesta parte; os outros
+182 estão guardados e 94 posições nunca aparecem no dado pois são os registros quarentenados); a tabela por ano mostra poucos jogos até 2012 e mais volume
 de 2016 em diante; `recommendations` tem cauda longa (de 108 a 1,1 milhão) e um pico só em escala log.
 
 # Bloco 3: P1, do segundo passo ao quarto
@@ -232,15 +232,196 @@ con.sql("""
 """).df()
 ```
 
-**Leitura da P1.** Os indies são **531 de 770 jogos (69,0%)**, mais que o dobro dos não indies (239),
-o que sustenta a expectativa. No preço, a mediana dos indies é **R$ 29,99** contra **R$ 45,96** dos
-demais (todos os jogos); entre os **pagos**, **R$ 37,49 contra R$ 50,00** (média R$ 44,33 contra
-R$ 82,15, puxada pela cauda mais longa dos não indies, de máximo R$ 419,94 contra R$ 207,96). Há mais jogos
-grátis entre os indies (18,3% contra 8,4%), então a diferença não é só questão de "ser pago".
+**Leitura da P1.** Os indies são **500 de 724 jogos (69,1%)**, mais que o dobro dos não indies (224),
+o que sustenta a expectativa. No preço, a mediana dos indies é **R$ 29,99** contra **R$ 44,99** dos
+demais (todos os jogos); entre os **pagos**, **R$ 37,49 contra R$ 50,50** (média R$ 44,37 contra
+R$ 82,06, puxada pela cauda mais longa dos não indies, de máximo R$ 419,94 contra R$ 207,96). Há mais jogos
+grátis entre os indies (18,8% contra 8,9%), então a diferença não é só questão de "ser pago".
 
 O que cada rival eliminou. Tirar os grátis **não** apaga a diferença (os indies seguem mais baratos entre
 os pagos). Tirar os preços convertidos de outra moeda e os imputados **mantém** a diferença (mediana
-R$ 34,99 contra R$ 47,49), mas os preços convertidos são bem mais altos (R$ 86,72 entre indies e
+R$ 34,99 contra R$ 46,99), mas os preços convertidos são bem mais altos (R$ 88,74 entre indies e
 R$ 159,96 entre não indies) e merecem investigação. A idade do jogo **não** explica sozinha: em cada
 quintil de datas a mediana paga do indie fica abaixo da do não indie, com diferença pequena na faixa mais
 antiga (R$ 29,99 contra R$ 33,99) e grande nas do meio. 
+
+# Bloco 4: P2, do segundo passo ao quarto
+
+## Duas colunas
+
+```{python}
+# | label: p2-dispersao
+px.scatter(d, x="release_date", y="rank", title="rank por data de lançamento (rank 1 = topo)",
+           opacity=0.6).update_yaxes(autorange="reversed").show()
+```
+
+```{python}
+# | label: p2-quintis
+con.sql("""
+    SELECT quintil_data, MIN(release_date)::DATE AS de, MAX(release_date)::DATE AS ate,
+           COUNT(*) AS n_jogos, ROUND(MEDIAN(rank)) AS rank_mediano,
+           COUNT(*) FILTER (WHERE rank <= 100) AS no_top100
+    FROM base GROUP BY quintil_data ORDER BY quintil_data
+""").df()
+```
+
+```{python}
+# | label: p2-mais-antigos
+con.sql("""
+    SELECT name, release_date::DATE AS lancamento, rank
+    FROM base ORDER BY release_date LIMIT 10
+""").df()
+```
+
+```{python}
+# | label: p2-correlacao
+# Correlação de postos entre a data e o rank (positiva: jogo mais novo tem número de rank maior, ou seja, pior posição)
+d["t"] = d["release_date"].astype("int64")
+d[["rank", "t"]].corr(method="spearman")
+```
+
+```{python}
+# | label: p2-box-periodo
+d["periodo"] = np.where(d["ano"] <= 2012, "até 2012", np.where(d["ano"] <= 2019, "2013 a 2019", "2020 em diante"))
+px.box(d, x="periodo", y="rank", category_orders={"periodo": ["até 2012", "2013 a 2019", "2020 em diante"]}).update_yaxes(autorange="reversed")
+```
+
+## Uma terceira coluna
+
+Duas rivais: o grupo (indie ou não) e as recomendações (jogo antigo tem mais tempo para acumular).
+
+```{python}
+# | label: p2-por-grupo
+con.sql("""
+    SELECT grupo, quintil_data, COUNT(*) AS n_jogos, ROUND(MEDIAN(rank)) AS rank_mediano
+    FROM base GROUP BY ALL ORDER BY grupo, quintil_data
+""").df()
+```
+
+```{python}
+# | label: p2-correlacao-grupo
+d3 = con.sql("SELECT grupo, rank, release_date FROM base").df()
+d3["t"] = d3["release_date"].astype("int64")
+d3.groupby("grupo")[["rank", "t"]].apply(lambda g: g.corr(method="spearman").iloc[0, 1]).round(3)
+```
+
+```{python}
+# | label: p2-recomendacoes
+con.sql("""
+    SELECT quintil_data, ROUND(MEDIAN(recommendations)) AS recomendacoes_medianas,
+           ROUND(MEDIAN(rank)) AS rank_mediano
+    FROM base GROUP BY quintil_data ORDER BY quintil_data
+""").df()
+```
+
+## A tabela cruzada
+
+```{python}
+# | label: p2-cruzada
+con.sql("""
+    SELECT quintil_data,
+           COUNT(*) FILTER (WHERE rank <= 100)  AS top100,
+           COUNT(*) FILTER (WHERE rank <= 250)  AS top250,
+           COUNT(*) FILTER (WHERE rank > 750)   AS ultimos250,
+           COUNT(*) AS n_jogos
+    FROM base GROUP BY quintil_data ORDER BY quintil_data
+""").df()
+```
+
+**Leitura da P2.** **Não.** A correlação de postos entre data e rank é de +0,04, praticamente
+zero, e os jogos antigos não ficam concentrados no topo: a faixa mais antiga (1998 a out/2016) tem rank
+mediano 532, parecido com o da mais nova (521) e pior que o das faixas do meio (429 a 481). O que existe são
+**poucos clássicos muito bem colocados** (Half-Life 2 em 26º, Counter-Strike em 39º, Garry's Mod em 47º) ao lado de
+antigos mal colocados (Zuma Deluxe em 953º, Half-Life: Opposing Force em 612º). O meio
+(2020 a 2024) tem o melhor rank mediano.
+
+Rivais eliminadas: o grupo não muda o quadro (correlação +0,04 entre indies e +0,02 entre não indies);
+as recomendações acumuladas **acompanham** a idade (mediana de 21 mil na faixa mais antiga contra 6 mil na mais nova), mas
+isso não vira rank melhor. 
+
+# Bloco 5: P3, do segundo passo ao quarto
+
+## Duas colunas
+
+```{python}
+# | label: p3-dispersao
+px.scatter(d, x="recommendations", y="rank", log_x=True, opacity=0.6,
+           title="rank por recomendações (escala log)").update_yaxes(autorange="reversed").show()
+```
+
+```{python}
+# | label: p3-quartis
+con.sql("""
+    WITH t AS (SELECT *, NTILE(4) OVER (ORDER BY recommendations) AS quartil_recs FROM base)
+    SELECT quartil_recs, MIN(recommendations) AS de, MAX(recommendations) AS ate,
+           COUNT(*) AS n_jogos, ROUND(MEDIAN(rank)) AS rank_mediano
+    FROM t GROUP BY quartil_recs ORDER BY quartil_recs
+""").df()
+```
+
+```{python}
+# | label: p3-correlacao
+d[["rank", "recommendations"]].corr(method="spearman")
+```
+
+## Uma terceira coluna
+
+```{python}
+# | label: p3-grupo
+d2 = con.sql("SELECT rank, recommendations, grupo FROM base").df()
+px.scatter(d2, x="recommendations", y="rank", color="grupo", log_x=True, opacity=0.5).update_yaxes(autorange="reversed").show()
+
+d2.groupby("grupo")[["rank", "recommendations"]].apply(lambda g: g.corr(method="spearman").iloc[0, 1]).round(3)
+```
+
+```{python}
+# | label: p3-imputadas
+con.sql("""
+    SELECT recommendations_imputada, COUNT(*) AS n_jogos, ROUND(MEDIAN(rank)) AS rank_mediano,
+           ROUND(MEDIAN(recommendations)) AS recs_medianas
+    FROM base GROUP BY recommendations_imputada
+""").df()
+```
+
+## A tabela cruzada
+
+```{python}
+# | label: p3-cruzada
+con.sql("""
+    WITH t AS (SELECT *, NTILE(4) OVER (PARTITION BY Indie ORDER BY recommendations) AS quartil_no_grupo FROM base)
+    SELECT grupo, quartil_no_grupo, MIN(recommendations) AS de, MAX(recommendations) AS ate,
+           COUNT(*) AS n_jogos, ROUND(MEDIAN(rank)) AS rank_mediano
+    FROM t GROUP BY ALL ORDER BY grupo, quartil_no_grupo
+""").df()
+```
+
+**Leitura da P3.** Existe relação, **moderada**, e mais fraca que a esperada: correlação de postos de
+**−0,42** (mais recomendações, número de rank menor, ou seja, melhor posição). O rank mediano cai de
+**692** (25% com menos recomendações) para **276** (25% com mais). Dentro dos grupos o sinal é o mesmo:
+**−0,40 nos indies e −0,49 nos não indies**, e o rank mediano do maior quartil é 286 nos indies e 231
+nos não indies. A relação **não depende** de ser indie. Com −0,42 sobra muita variação
+sem explicar: há jogos de poucas recomendações no topo e jogos muito recomendados lá embaixo. Os 94
+valores de recomendações imputados não mudam o quadro (rank mediano 482 contra 490 nos observados).
+
+Pendentes: o rank pode depender de outra coisa (horas jogadas, avaliações positivas), e as recomendações
+dependem da idade do jogo (ver P2) e do tamanho da audiência. O dado não decide a direção.
+
+# Bloco 6: a tabela de hipóteses a confirmar
+
+Uma linha por pergunta. A previsão diz o que conferir nos 182 jogos guardados: se ela falhar, a hipótese cai.
+Com 182 jogos, as conferências por grupo são frágeis; por isso as previsões
+falam de **sentido e ordem de grandeza**, não de números exatos.
+
+| # | Expectativa | Padrão, com o número, e veredito | Rivais eliminadas | Rivais pendentes | Decisão e previsão que a confirma |
+|:--|:-----------|:-----------|:-----------|:-----------|:-----------|
+| P1 | Indies são a maioria e mais baratos | Indies são 69,1% (500 de 724); mediana R$ 29,99 contra R$ 44,99 (todos) e R$ 37,49 contra R$ 50,50 (pagos). **Sustentada** | Jogos grátis (indies têm mais, 19% contra 9%, e a diferença persiste entre pagos); preço convertido/imputado; idade do jogo (a diferença aparece nos 5 quintis de data) | Gênero; porte da editora; preços convertidos bem acima dos demais | Nos guardados: mais de 50% de indies **e** mediana paga do indie abaixo da do não indie (Mann-Whitney entre pagos na Análise); se a mediana paga indie ficar igual ou acima, a hipótese cai |
+| P2 | Sem relação geral entre antiguidade e rank | Correlação de postos +0,04; faixa mais antiga com rank mediano 532 (mais nova 521, meio 429 a 481); 16 jogos no top 100 contra 9 na mais nova. **Sustentada** (não há relação) | Grupo indie/não indie (correlação ≈ +0,04 e +0,02) | O critério que gera o `rank`; clássicos da Valve podem ser exceção por serem marcas | Nos guardados: \|correlação de postos\| abaixo de 0,15, sem faixa de data com rank mediano muito melhor que as outras; se passar de 0,3 em módulo, cai |
+| P3 | Mais recomendações, rank melhor, igual nos dois grupos | Correlação −0,42; rank mediano de 692 a 276 do menor ao maior quartil; −0,40 (indies) e −0,49 (não indies). **Sustentada em parte** (mais fraca que o esperado) | Diferença de sentido entre indies e não indies; recomendações imputadas | Idade do jogo e audiência como causa comum; critério do rank | Nos guardados: correlação de postos entre −0,3 e −0,6, com sinal negativo nos dois grupos; se for positiva ou perto de zero em algum grupo, cai. Na Análise, regressão de `rank` sobre recomendações e ano de lançamento |
+
+# Bloco 7: perguntas para depois
+
+Sem investigar agora.
+
+- Os preços "convertidos" (63 jogos) são bem mais altos que os demais: a conversão de moeda está correta?
+- Jogos com suporte total a controle têm rank melhor (mediana 439 contra 522)? Pode ser efeito de gênero.
+- `required_age` e `entidade_faixa_etaria` precisam de padronização antes de qualquer comparação.
