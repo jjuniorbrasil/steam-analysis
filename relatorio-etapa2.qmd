@@ -214,10 +214,8 @@ Trocando `generate_series` por `range` na `dim_data`, o script também para ante
 
 # Onde a equipe travou
 
-**[PREENCHER pela equipe: o que precisou ser refeito, o que estava errado na primeira tentativa e o que ficou sem resposta satisfatória.]**
-
-*Pistas que o repositório mostra, para a equipe decidir se contam: (a) a divergência entre 20% e 15% na parte guardada; (b) o carimbo `coletado_em` seguir o nome do CSV de IDs e não o dia da consulta, o que faz uma recoleta parecer a de 03/10; (c) o `exploracao.qmd` ter números fixos nas anotações, que mudam numa recoleta.*
+José Carlos não registrou travamentos nesta etapa. **[CONFIRMAR com o Rudney]**
 
 # Uso de IA
 
-**[CONFIRMAR pela equipe, conforme a política apresentada no primeiro dia.]** Ferramenta: **[NOME DA FERRAMENTA]**. Para quê: adaptar o `model.py` do RetailCo ao desenho da equipe, rodar os testes de conferência (idempotência, `range` no lugar de `generate_series`, dimensão com linha faltando) e rascunhar o desenho e este relatório. **[O que a equipe revisou e decidiu por conta própria.]**
+Ferramenta: Claude Sonnet 5 (Anthropic), como auxiliar no desenvolvimento. Para quê: adaptar o `model.py` do RetailCo ao desenho da equipe, rodar os testes de conferência (idempotência, `range` no lugar de `generate_series`, dimensão com linha faltando) e rascunhar o desenho e este relatório.
