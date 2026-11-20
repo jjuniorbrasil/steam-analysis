@@ -1,0 +1,223 @@
+---
+title: "Atividade prática da Etapa 2: da camada trusted ao gold"
+subtitle: "Introdução à Ciência de Dados · Sistemas de Informação · IFMA"
+lang: pt-BR
+format:
+  typst:
+    papersize: a4
+    margin:
+      x: 2cm
+      y: 1.8cm
+    fontsize: 9.5pt
+    section-numbering: "1."
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+# | label: setup
+import hashlib
+import json
+import math
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+import duckdb
+
+RAIZ = Path.cwd()
+BRUTO = RAIZ / "data/raw/steam-appdetails.jsonl"
+TRUSTED = RAIZ / "data/trusted/jogos.parquet"
+QUARENTENA = RAIZ / "data/quarentena/rejeitados.parquet"
+MODEL = RAIZ / "src/model.py"
+DESENHO = ("dim_data", "dim_jogo", "dim_faixa_etaria", "dim_qualidade_dado", "fato_jogos", "fato_jogos_ano_grupo")
+FRACAO_GUARDADA = 0.20  # a mesma do exploracao.qmd
+
+
+def n(valor) -> str:
+    return f"{int(valor):,}".replace(",", ".")
+
+
+def pct(parte, todo) -> str:
+    return f"{100 * parte / todo:.1f}".replace(".", ",") + "%"
+
+
+def data_br(aaaammdd: str) -> str:
+    return f"{aaaammdd[6:8]}/{aaaammdd[4:6]}/{aaaammdd[0:4]}"
+
+
+def bloco(texto: str) -> None:
+    print("```text\n" + texto + "\n```")
+
+
+con = duckdb.connect()
+
+# --- 1. a coleta -------------------------------------------------------------
+registros = [json.loads(l) for l in BRUTO.open(encoding="utf-8") if l.strip()]
+n_registros = len(registros)
+lista_em = data_br(str(registros[0]["coletado_em"]))
+gravado_em = datetime.fromtimestamp(BRUTO.stat().st_mtime).strftime("%d/%m/%Y")
+n_trusted = con.sql(f"SELECT COUNT(*) FROM '{TRUSTED}'").fetchall()[0][0]
+quarentena = con.sql(
+    f"SELECT motivo, COUNT(*) AS linhas FROM '{QUARENTENA}' GROUP BY 1 ORDER BY 2 DESC, 1"
+).fetchall()
+n_quarentena = sum(linhas for _, linhas in quarentena)
+
+# --- 2. a parte guardada (só a contagem; o conteúdo não é olhado) ------------
+n_guardados = math.ceil(FRACAO_GUARDADA * n_trusted)
+n_explorados = n_trusted - n_guardados
+
+# --- 3. o model.py, rodado numa pasta temporária (o data/gold/ real não é tocado)
+tmp = Path(tempfile.mkdtemp(prefix="model-relatorio-"))
+(tmp / "data").mkdir()
+(tmp / "data" / "trusted").symlink_to(RAIZ / "data" / "trusted")
+GOLD_TMP = tmp / "data" / "gold"
+
+
+def rodar(script: Path) -> str:
+    r = subprocess.run([sys.executable, str(script)], cwd=tmp, capture_output=True, text=True)
+    return (r.stdout + r.stderr).rstrip()
+
+
+def hashes() -> dict:
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(GOLD_TMP.glob("*.parquet"))}
+
+
+saida_normal = rodar(MODEL)
+primeira = hashes()
+shutil.rmtree(GOLD_TMP)
+rodar(MODEL)
+identico = primeira == hashes() and len(primeira) == len(DESENHO)
+
+codigo = MODEL.read_text(encoding="utf-8")
+alvo_dim = "               supported_languages AS idiomas\n        FROM jogos\n"
+assert alvo_dim in codigo and "generate_series" in codigo, "o model.py mudou: ajuste os testes do relatório"
+falta = tmp / "model_dimensao_faltando.py"
+falta.write_text(
+    codigo.replace(alvo_dim, alvo_dim + "        WHERE appid <> (SELECT MIN(appid::BIGINT)::VARCHAR FROM jogos)\n"),
+    encoding="utf-8",
+)
+shutil.rmtree(GOLD_TMP, ignore_errors=True)  # parte de uma pasta sem gold, para ver se o script grava ao parar
+saida_falta = rodar(falta)
+gravou_falta = GOLD_TMP.exists()
+shutil.rmtree(GOLD_TMP, ignore_errors=True)
+rng = tmp / "model_range.py"
+rng.write_text(codigo.replace("generate_series", "range"), encoding="utf-8")
+saida_range = rodar(rng)
+gravou_range = GOLD_TMP.exists()
+chave_falta_range = next((l.split(":", 1)[1].strip() for l in saida_range.splitlines() if "chave que falta" in l), "?")
+
+# --- 4. o gold: o real, se existir; senão o da pasta temporária -------------
+rodar(MODEL)  # refaz o gold temporário para ler as contagens
+GOLD = RAIZ / "data/gold" if (RAIZ / "data/gold").exists() else GOLD_TMP
+arquivos = {p.stem for p in GOLD.glob("*.parquet")}
+bate_desenho = arquivos == set(DESENHO)
+linhas = {t: con.sql(f"SELECT COUNT(*) FROM '{GOLD}/{t}.parquet'").fetchall()[0][0] for t in DESENHO}
+d0, d1 = con.sql(f"SELECT MIN(data), MAX(data) FROM '{GOLD}/dim_data.parquet'").fetchall()[0]
+dias = linhas["dim_data"]
+```
+
+**Disciplina:** Introdução à Ciência de Dados · Prof. Dr. Josenildo Silva\
+**Integrantes:** José Carlos Chaves Brasil Júnior — 20231SI0003 · Rudney Gabriel Gonçalves Fonseca — 20231SI0025\
+**Repositório:** github.com/jjuniorbrasil/steam-analysis · **Fonte:** API `appdetails` da Steam Store (a mesma da Etapa 1)
+
+# A coleta e o que mudou desde a Etapa 1
+
+**Coleta analisada.** Lista de IDs do SteamDB de `{python} lista_em` (é a data que o `ingest.py` grava em `coletado_em`, porque ele a tira do nome do CSV de IDs), consultada na API da Steam até `{python} gravado_em` (data de gravação do `data/raw/steam-appdetails.jsonl`). São `{python} n(n_registros)` registros. O dado bruto não é versionado e o `ingest.py` o recria, então uma nova coleta pode dar números diferentes dos da Etapa 1.
+
+**Registros.** `{python} n(n_registros)` consultados, **`{python} n(n_trusted)` na trusted** (`{python} pct(n_trusted, n_registros)`) e `{python} n(n_quarentena)` na quarentena:
+
+```{python}
+# | output: asis
+print("| Motivo na quarentena | Linhas |\n|:--|--:|")
+for motivo, qtd in quarentena:
+    print(f"| `{motivo}` | {n(qtd)} |")
+```
+
+**O que mudou desde a Etapa 1.**
+
+- O contrato ganhou a coluna `rank` (posição do jogo na lista, de 1 em diante, única). O `transform.py` a atribui pela ordem do JSONL e a leva também à quarentena (commit `294b7ed`).
+- O `diagnostico.qmd` deixou de ter contagens fixas (997 linhas, 3 sem ficha) e passou a conferir duplicata por `appid`.
+- **[PREENCHER: o que o retorno da Etapa 1 apontou e o que foi consertado, com o antes e o depois em números. Se nada mudou, dizer isso.]**
+
+# A exploração
+
+**Perguntas e expectativas**, escritas antes de qualquer consulta (no `exploracao.qmd`):
+
+| # | Pergunta | Colunas | Expectativa |
+|:--|:---------|:--------|:------------|
+| P1 | Qual a proporção de indies e como os preços deles se comparam com os demais? | `Indie`, `price_brl`, `is_free` | Indies são mais da metade e mais baratos que os não indies. |
+| P2 | Os jogos com data de lançamento mais antiga ocupam os maiores ranks? | `release_date`, `rank` | Não: clássicos antigos aparecem no topo, mas são poucos; sem relação geral. |
+| P3 | Jogos com mais recomendações ocupam ranks melhores, e isso vale igual para indies e não indies? | `recommendations`, `rank`, `Indie` | Sim, relação forte e parecida nos dois grupos. |
+
+**Parte guardada.** `{python} int(FRACAO_GUARDADA * 100)`% dos jogos, por **sorteio**: ordena-se pelo hash do `appid` com semente fixa (`icd-jogos-1`) e guardam-se os primeiros. Não há corte por tempo porque a coleta é um retrato único, e cortar por `release_date` mudaria a resposta da P2, que usa justamente essa coluna. Nesta coleta são `{python} n(n_guardados)` jogos guardados e `{python} n(n_explorados)` explorados. As consultas passam pelas views `jogos`, `base` e `pagos`, que excluem a parte guardada. **[CONFERIR: o texto do `exploracao.qmd` diz 20%, mas as anotações citam 770 explorados e 136 guardados (15%) na coleta anterior.]**
+
+**Hipóteses a confirmar**, com a previsão escrita de modo que a parte guardada possa confirmá-la ou derrubá-la. A da P1 sai só do que o `exploracao.qmd` já registra (indies perto de 69% dos jogos explorados, e mediana paga de R$ 37,49 contra R$ 50,00), sem olhar a parte guardada:
+
+| # | Previsão para a parte guardada | Como confirma ou derruba |
+|:--|:-------------------------------|:-------------------------|
+| P1 | Os indies serão mais da metade dos jogos guardados, e a mediana de preço dos jogos pagos do indie ficará abaixo da dos não indies. | Derruba se os indies forem 50% ou menos, ou se a mediana paga do indie ficar igual ou acima da dos não indies. |
+| P2 | **[PREENCHER depois da varredura da P2, que ainda não está no `exploracao.qmd`]** | |
+| P3 | **[PREENCHER depois da varredura da P3, que ainda não está no `exploracao.qmd`]** | |
+
+# O desenho do modelo
+
+**1. Processo de negócio: ranquear.** A comunidade da Steam avalia os jogos publicados na loja, e a lista do SteamDB os ordena pelos mais bem avaliados (pelo menos 500 avaliações). Cada registro é um jogo naquela posição da lista.
+
+**2. Granularidade: uma linha por jogo na lista coletada.** Outras eram possíveis. Mais grossa, por ano de lançamento ou por grupo indie, perderia o jogo, e a P3 (recomendações contra rank) precisa dele; essa versão existe, como agregada. Mais fina, por jogo e gênero (ou jogo e idioma), repetiria recomendações e conquistas em cada gênero e somaria duas vezes o mesmo jogo, e o dado não traz medida por gênero. Por jogo e dia não existe: a coleta é um retrato único, sem histórico de rank.
+
+**3. Dimensões**, todas verdadeiras para uma linha por jogo:
+
+| Dimensão | Chave | Atributos para filtrar ou agrupar | Por que vale para o jogo |
+|:--|:--|:--|:--|
+| `dim_data` | a própria data | `ano`, `trimestre`, `mes`, `dia_semana` | Um jogo tem uma data de lançamento. Cobre `{python} d0.strftime("%d/%m/%Y")` a `{python} d1.strftime("%d/%m/%Y")` (`{python} n(dias)` dias), inclusive os sem lançamento. |
+| `dim_jogo` | `jogo_sk` | `grupo` (indie ou não), `gratuito`, `controller_support`, `nome` | É o próprio jogo. |
+| `dim_faixa_etaria` | `faixa_etaria_sk` | `faixa_etaria`, `entidade` (`{python} n(linhas["dim_faixa_etaria"])` combinações) | Um jogo tem uma faixa etária e a entidade que a deu. |
+| `dim_qualidade_dado` | `qualidade_sk` | `preco_convertido`, `preco_imputado`, `recomendacoes_imputadas`, `conquistas_imputadas` (`{python} n(linhas["dim_qualidade_dado"])` combinações) | Os indicadores dizem como o valor daquele jogo foi obtido. |
+
+Não viraram dimensão: a data da coleta (constante, retrato único) e desenvolvedoras e publicadoras (listas em texto, ver o item 5).
+
+**4. Medidas** da `fato_jogos` e a classe de cada uma:
+
+| Medida | Classe | Tratamento |
+|:--|:--|:--|
+| `recomendacoes` | aditiva | soma sem problema |
+| `conquistas`, `dlcs`, `pacotes` | aditiva | contagens por jogo: soma sem problema |
+| `preco_brl` | não aditiva | preço de tabela de cada jogo: somar entre jogos não dá o preço do ano. A agregada guarda a soma e a contagem dos pagos, e a média sai da divisão. Os gratuitos (R$ 0) ficam fora. |
+| `rank` | não aditiva (ordinal) | é a posição na lista: não se soma nem se tira média. A soma aparece na conferência só como checagem de integridade. |
+
+**5. O que é de outra granularidade.** Gêneros, categorias, idiomas, desenvolvedoras e publicadoras são listas: um jogo tem vários, então medem uma unidade mais fina (jogo e gênero). Ficaram como texto na `dim_jogo`, sem tabela própria; a coluna `grupo` (indie) já sai do gênero. Para filtrar por gênero seria preciso uma ponte jogo-gênero, que não foi feita.
+
+**6. A fato agregada: `fato_jogos_ano_grupo`.** Atende a P1. Granularidade: um ano de lançamento e um grupo (indie ou não). Colunas: `jogos`, `jogos_gratis`, `jogos_pagos`, `soma_preco_pagos`, `recomendacoes`. Filtros que ficam: nenhum, entram todos os jogos da trusted. Chave da linha atômica que se perde: `jogo_sk` (e o `appid`), junto com rank, faixa etária e indicadores de qualidade. Ela é conferida contra a `fato_jogos` (contagem, gratuitos, soma de preço e soma de recomendações).
+
+**O desenho `{python} "bate" if bate_desenho else "NÃO BATE"` com `data/gold/`:** `{python} len(DESENHO)` tabelas no desenho e `{python} len(arquivos)` arquivos no gold. Linhas: `dim_data` `{python} n(linhas["dim_data"])`, `dim_jogo` `{python} n(linhas["dim_jogo"])`, `dim_faixa_etaria` `{python} n(linhas["dim_faixa_etaria"])`, `dim_qualidade_dado` `{python} n(linhas["dim_qualidade_dado"])`, `fato_jogos` `{python} n(linhas["fato_jogos"])`, `fato_jogos_ano_grupo` `{python} n(linhas["fato_jogos_ano_grupo"])`.
+
+**Saída 1: execução normal** (`uv run python src/model.py`)
+
+```{python}
+# | output: asis
+bloco(saida_normal)
+```
+
+**Saída 2: com uma linha de dimensão faltando** (a `dim_jogo` sem o menor `appid`). O script para antes de gravar, aponta a chave e o `data/gold/` `{python} "foi criado, e isso é um erro" if gravou_falta else "não é criado"`:
+
+```{python}
+# | output: asis
+bloco(saida_falta)
+```
+
+Trocando `generate_series` por `range` na `dim_data`, o script também para antes de gravar e aponta a data que falta (`{python} chave_falta_range`); `data/gold/` `{python} "foi criado, e isso é um erro" if gravou_range else "não foi criado"`. Apagando `data/gold/` e rodando de novo, os `{python} len(primeira)` arquivos Parquet saem `{python} "idênticos (mesmo SHA-256)" if identico else "DIFERENTES"`.
+
+# Onde a equipe travou
+
+**[PREENCHER pela equipe: o que precisou ser refeito, o que estava errado na primeira tentativa e o que ficou sem resposta satisfatória.]**
+
+*Pistas que o repositório mostra, para a equipe decidir se contam: (a) a divergência entre 20% e 15% na parte guardada; (b) o carimbo `coletado_em` seguir o nome do CSV de IDs e não o dia da consulta, o que faz uma recoleta parecer a de 03/10; (c) o `exploracao.qmd` ter números fixos nas anotações, que mudam numa recoleta.*
+
+# Uso de IA
+
+**[CONFIRMAR pela equipe, conforme a política apresentada no primeiro dia.]** Ferramenta: **[NOME DA FERRAMENTA]**. Para quê: adaptar o `model.py` do RetailCo ao desenho da equipe, rodar os testes de conferência (idempotência, `range` no lugar de `generate_series`, dimensão com linha faltando) e rascunhar o desenho e este relatório. **[O que a equipe revisou e decidiu por conta própria.]**
