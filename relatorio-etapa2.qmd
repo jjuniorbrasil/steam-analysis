@@ -35,7 +35,7 @@ TRUSTED = RAIZ / "data/trusted/jogos.parquet"
 QUARENTENA = RAIZ / "data/quarentena/rejeitados.parquet"
 MODEL = RAIZ / "src/model.py"
 DESENHO = ("dim_data", "dim_jogo", "dim_faixa_etaria", "dim_qualidade_dado", "fato_jogos", "fato_jogos_ano_grupo")
-FRACAO_GUARDADA = 0.20  # a mesma do exploracao.qmd
+FRACAO_GUARDADA = 0.15  # a mesma do exploracao.qmd
 
 
 def n(valor) -> str:
@@ -142,7 +142,7 @@ for motivo, qtd in quarentena:
 
 - O contrato ganhou a coluna `rank` (posição do jogo na lista, de 1 em diante, única). O `transform.py` a atribui pela ordem do JSONL e a leva também à quarentena (commit `294b7ed`).
 - O `diagnostico.qmd` deixou de ter contagens fixas (997 linhas, 3 sem ficha) e passou a conferir duplicata por `appid`.
-- **[PREENCHER: o que o retorno da Etapa 1 apontou e o que foi consertado, com o antes e o depois em números. Se nada mudou, dizer isso.]**
+- **Retorno da Etapa 1** (devolutiva de 10/11). Um dos pontos apontados, as contagens fixas (997 e 3) no `diagnostico.qmd`, está tratado, e é o item acima: o `assert` agora compara com o que o próprio dado diz. Os demais pontos da devolutiva (`quarto-cli` no `pyproject.toml`, `DATA_COLETA` fixa no `transform.py`, consultas da classificação MCAR, data e fonte das taxas de câmbio, texto do `diagnostico.qmd`, arquivo antigo da quarentena e tratamento do 403) **não foram alterados nesta etapa**.
 
 # A exploração
 
@@ -154,15 +154,17 @@ for motivo, qtd in quarentena:
 | P2 | Os jogos com data de lançamento mais antiga ocupam os maiores ranks? | `release_date`, `rank` | Não: clássicos antigos aparecem no topo, mas são poucos; sem relação geral. |
 | P3 | Jogos com mais recomendações ocupam ranks melhores, e isso vale igual para indies e não indies? | `recommendations`, `rank`, `Indie` | Sim, relação forte e parecida nos dois grupos. |
 
-**Parte guardada.** `{python} int(FRACAO_GUARDADA * 100)`% dos jogos, por **sorteio**: ordena-se pelo hash do `appid` com semente fixa (`icd-jogos-1`) e guardam-se os primeiros. Não há corte por tempo porque a coleta é um retrato único, e cortar por `release_date` mudaria a resposta da P2, que usa justamente essa coluna. Nesta coleta são `{python} n(n_guardados)` jogos guardados e `{python} n(n_explorados)` explorados. As consultas passam pelas views `jogos`, `base` e `pagos`, que excluem a parte guardada. **[CONFERIR: o texto do `exploracao.qmd` diz 20%, mas as anotações citam 770 explorados e 136 guardados (15%) na coleta anterior.]**
+**Parte guardada.** `{python} int(FRACAO_GUARDADA * 100)`% dos jogos, por **sorteio**: ordena-se pelo hash do `appid` com semente fixa (`icd-jogos-1`) e guardam-se os primeiros. Não há corte por tempo porque a coleta é um retrato único, e cortar por `release_date` mudaria a resposta da P2, que usa justamente essa coluna. Nesta coleta são `{python} n(n_guardados)` jogos guardados e `{python} n(n_explorados)` explorados. As consultas passam pelas views `jogos`, `base` e `pagos`, que excluem a parte guardada.
 
 **Hipóteses a confirmar**, com a previsão escrita de modo que a parte guardada possa confirmá-la ou derrubá-la. A da P1 sai só do que o `exploracao.qmd` já registra (indies perto de 69% dos jogos explorados, e mediana paga de R$ 37,49 contra R$ 50,00), sem olhar a parte guardada:
 
 | # | Previsão para a parte guardada | Como confirma ou derruba |
 |:--|:-------------------------------|:-------------------------|
 | P1 | Os indies serão mais da metade dos jogos guardados, e a mediana de preço dos jogos pagos do indie ficará abaixo da dos não indies. | Derruba se os indies forem 50% ou menos, ou se a mediana paga do indie ficar igual ou acima da dos não indies. |
-| P2 | **[PREENCHER depois da varredura da P2, que ainda não está no `exploracao.qmd`]** | |
-| P3 | **[PREENCHER depois da varredura da P3, que ainda não está no `exploracao.qmd`]** | |
+| P2 | A data de lançamento não tem relação geral com o `rank`: a varredura achou correlação de postos perto de zero, sem tendência pelas faixas de datas. | Se, na parte guardada, a correlação de postos entre a data e o `rank` ficar entre -0,15 e 0,15, a data não ajuda a prever a posição; se sair dessa faixa, a expectativa cai. |
+| P3 | Mais recomendações acompanham `rank` melhor, com relação moderada (e não forte), parecida em indies e não indies. | Se, na parte guardada, a correlação de postos entre `recommendations` e `rank` for -0,30 ou menor, e a diferença entre indies e não indies for menor que 0,20, a relação se repete; se ficar acima de -0,30 em qualquer grupo, ela cai. |
+
+A varredura completa, com as rivais eliminadas e as pendentes, está no `exploracao.qmd`; a parte guardada não foi olhada.
 
 # O desenho do modelo
 
