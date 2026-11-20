@@ -142,7 +142,7 @@ for motivo, qtd in quarentena:
 
 - O contrato ganhou a coluna `rank` (posição do jogo na lista, de 1 em diante, única). O `transform.py` a atribui pela ordem do JSONL e a leva também à quarentena (commit `294b7ed`).
 - O `diagnostico.qmd` deixou de ter contagens fixas (997 linhas, 3 sem ficha) e passou a conferir duplicata por `appid`.
-- **Retorno da Etapa 1** (devolutiva de 10/11). Um dos pontos apontados, as contagens fixas (997 e 3) no `diagnostico.qmd`, está tratado, e é o item acima: o `assert` agora compara com o que o próprio dado diz. Os demais pontos da devolutiva (`quarto-cli` no `pyproject.toml`, `DATA_COLETA` fixa no `transform.py`, consultas da classificação MCAR, data e fonte das taxas de câmbio, texto do `diagnostico.qmd`, arquivo antigo da quarentena e tratamento do 403) **não foram alterados nesta etapa**.
+- **Retorno da Etapa 1** (devolutiva de 10/11). Dois dos pontos apontados estão tratados: as contagens fixas (997 e 3) no `diagnostico.qmd`, que é o item acima (o `assert` agora compara com o que o próprio dado diz), e a declaração do `quarto-cli` no `pyproject.toml` e no `uv.lock`, para o `uv run quarto render` funcionar num clone limpo, sem Quarto no sistema. Os demais pontos da devolutiva (`DATA_COLETA` fixa no `transform.py`, consultas da classificação MCAR, data e fonte das taxas de câmbio, texto do `diagnostico.qmd`, arquivo antigo da quarentena e tratamento do 403) **não foram alterados nesta etapa**.
 
 # A exploração
 
