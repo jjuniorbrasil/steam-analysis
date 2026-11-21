@@ -216,7 +216,7 @@ Trocando `generate_series` por `range` na `dim_data`, o script também para ante
 
 # Onde a equipe travou
 
-José Carlos não registrou travamentos nesta etapa. **[CONFIRMAR com o Rudney]**
+Nada travou o trabalho, mas uma dúvida ficou sem resposta satisfatória: a **conversão de moeda**. A API devolve o preço na moeda da loja, e o `transform.py` o leva a real com as taxas de `src/domain/taxas.py`, que são valores redondos assumidos pela equipe, e não a cotação do dia. Na exploração (P1, terceira coluna), os preços convertidos saíram bem mais altos que os demais. Isso sugere que a conversão pode não estar boa, ou que converter nem tenha sido uma boa ideia. A exploração não decide qual das duas, e a pergunta ficou na lista de perguntas para depois do `exploracao.qmd`.
 
 # Uso de IA
 
