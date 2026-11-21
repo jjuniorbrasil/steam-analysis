@@ -22,10 +22,10 @@ O dado é o ranking de jogos da Steam (`data/trusted/jogos.parquet`): uma linha 
 com `rank` de 1 a 1000 (1 é o topo). Como a coleta é um retrato único, a parte guardada **não pode ser
 por tempo**; e cortar por `release_date` seria pior ainda, porque a data é justamente a coluna da P2
 (tirar os jogos mais novos ou mais antigos mudaria a resposta). O corte é então **por sorteio**:
-20% dos jogos (182) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
+15% dos jogos (136) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
 
 O sorteio é reproduzível: ordena os jogos por um *hash* do `appid` com uma semente fixa e guarda os
-primeiros 20%. Trocar a semente ou a fração muda o sorteio; 
+primeiros 15%. Trocar a semente ou a fração muda o sorteio; 
 
 ```{python}
 # | label: setup
@@ -33,7 +33,7 @@ import duckdb
 import numpy as np
 import plotly.express as px
 
-FRACAO_GUARDADA = 0.20            # parte guardada para a confirmação
+FRACAO_GUARDADA = 0.15            # parte guardada para a confirmação
 SEMENTE = "icd-jogos-1"           # fixa o sorteio;
 CAMINHO = "data/trusted/jogos.parquet" 
 
@@ -244,3 +244,175 @@ R$ 34,99 contra R$ 47,49), mas os preços convertidos são bem mais altos (R$ 86
 R$ 159,96 entre não indies) e merecem investigação. A idade do jogo **não** explica sozinha: em cada
 quintil de datas a mediana paga do indie fica abaixo da do não indie, com diferença pequena na faixa mais
 antiga (R$ 29,99 contra R$ 33,99) e grande nas do meio. 
+
+
+# Bloco 3: P2, do segundo passo ao quarto
+
+A P2 declarou duas colunas, `release_date` e `rank`, e a rival do `rank` é a mistura entre indies e não indies. O `rank` vale 1 para o topo da lista, então "ocupar os melhores ranks" é ter um número pequeno.
+
+## Duas colunas
+
+Uma numérica ao longo do tempo pede a dispersão da data contra o `rank`, e as cinco faixas de datas da view `base` (`quintil_data`) dão o resumo exato:
+
+```{python}
+# | label: p2-dispersao
+def br(x, casas=2):
+    return f"{x:.{casas}f}".replace(".", ",")
+
+pontos = con.sql("SELECT release_date, rank, grupo, quintil_data FROM base").df()
+fig = px.scatter(pontos, x="release_date", y="rank", opacity=0.5, title="rank contra a data de lançamento")
+fig.update_yaxes(autorange="reversed")      # o topo da lista (rank 1) fica em cima
+fig.show()
+px.box(pontos, x="quintil_data", y="rank", title="rank por faixa de datas (1 = mais antiga)").update_yaxes(autorange="reversed").show()
+```
+
+```{python}
+# | label: p2-tabela
+p2 = con.sql("""
+    SELECT quintil_data, MIN(release_date)::DATE AS de, MAX(release_date)::DATE AS ate, COUNT(*) AS n_jogos,
+           MEDIAN(rank) AS rank_mediano,
+           ROUND(100 * AVG((rank <= 100)::INT), 1) AS pct_no_top_100
+    FROM base GROUP BY quintil_data ORDER BY quintil_data
+""").df()
+rho_p2 = pontos["release_date"].rank().corr(pontos["rank"].rank())     # correlação de postos (Spearman)
+n_top = con.sql("SELECT COUNT(*) FROM base WHERE rank <= 100").fetchall()[0][0]
+antigos_top = con.sql("SELECT COUNT(*) FROM base WHERE rank <= 100 AND ano <= 2012").fetchall()[0][0]
+p2
+```
+
+## Uma terceira coluna
+
+A mistura é a rival: se os indies forem mais novos, e tiverem outro `rank`, a faixa de datas misturaria os dois grupos. A terceira coluna é o grupo, em cor, na mesma comparação:
+
+```{python}
+# | label: p2-grupo
+px.box(pontos, x="quintil_data", y="rank", color="grupo",
+       title="rank por faixa de datas, por grupo").update_yaxes(autorange="reversed").show()
+rho_p2_grupo = {g: x["release_date"].rank().corr(x["rank"].rank()) for g, x in pontos.groupby("grupo")}
+```
+
+## A tabela cruzada
+
+```{python}
+# | label: p2-cruzada
+con.sql("""
+    SELECT quintil_data, grupo, COUNT(*) AS n_jogos, MEDIAN(rank) AS rank_mediano
+    FROM base GROUP BY ALL ORDER BY quintil_data, grupo
+""").df()
+```
+
+**Leitura da P2.** A correlação de postos entre a data e o `rank` é de `{python} br(rho_p2)`, e a mediana do `rank` não anda em linha reta pelas cinco faixas (de `{python} int(p2["rank_mediano"].min())` a `{python} int(p2["rank_mediano"].max())`). Os jogos mais antigos aparecem entre os 100 primeiros, mas são poucos: `{python} antigos_top` dos `{python} n_top` jogos da parte explorada com `rank` até 100 são de 2012 ou antes, e `{python} br(p2.loc[0, "pct_no_top_100"], 1)`% da faixa mais antiga está no top 100, contra `{python} br(p2.loc[4, "pct_no_top_100"], 1)`% da mais nova. A expectativa (sem relação geral, com uns poucos clássicos no topo) **se sustentou**.
+
+O que cada rival eliminou. A **mistura de grupos** não explica: dentro de cada grupo a correlação também é perto de zero (`{python} br(rho_p2_grupo["indie"])` nos indies e `{python} br(rho_p2_grupo["não indie"])` nos não indies), e a mediana de cada faixa fica parecida nos dois, com a maior diferença na faixa mais antiga. Pendentes: o **acaso** e a **seleção da lista**: ela só traz jogos com pelo menos 500 avaliações, e um jogo novo leva tempo para chegar a esse número.
+
+
+# Bloco 3: P3, do segundo passo ao quarto
+
+A P3 declarou três colunas: `recommendations`, `rank` e `Indie`. As duas primeiras são numéricas, e as recomendações têm cauda longa, então entram em escala logarítmica.
+
+## Duas colunas
+
+```{python}
+# | label: p3-dispersao
+p3 = con.sql("""SELECT rank, recommendations, recommendations_imputada, grupo, quintil_data FROM base""").df()
+p3["log_recs"] = np.log10(p3["recommendations"])      # 3 = mil recomendações; 5 = cem mil
+fig = px.scatter(p3, x="log_recs", y="rank", opacity=0.5, title="rank contra o log10 das recomendações")
+fig.update_yaxes(autorange="reversed")
+fig.show()
+rho_p3 = p3["recommendations"].rank().corr(p3["rank"].rank())
+rho_p3
+```
+
+A correlação de postos é negativa porque o `rank` pequeno é o topo: mais recomendações, número menor.
+
+## Uma terceira coluna
+
+O grupo em cor, e duas rivais que se testam do mesmo jeito: o valor imputado (não foi observado) e a idade do jogo (um jogo antigo teve mais tempo para juntar recomendações):
+
+```{python}
+# | label: p3-terceira
+fig = px.scatter(p3, x="log_recs", y="rank", color="grupo", opacity=0.5, title="rank contra o log10 das recomendações, por grupo")
+fig.update_yaxes(autorange="reversed")
+fig.show()
+
+def rho(x):
+    return x["recommendations"].rank().corr(x["rank"].rank())
+
+linhas = [("todos", len(p3), rho(p3)), ("sem os imputados", int((~p3["recommendations_imputada"]).sum()), rho(p3[~p3["recommendations_imputada"]]))]
+linhas += [(f"grupo: {g}", len(x), rho(x)) for g, x in p3.groupby("grupo")]
+linhas += [(f"faixa de datas {k}", len(x), rho(x)) for k, x in p3.groupby("quintil_data")]
+import pandas as pd
+rhos = pd.DataFrame(linhas, columns=["recorte", "n_jogos", "correlacao_de_postos"]).round(2)
+rhos
+```
+
+## A tabela cruzada
+
+A correlação diz se há relação, e não qual. A tabela mostra o formato: em cada grupo, os jogos em quatro faixas de recomendações, e o `rank` mediano de cada faixa.
+
+```{python}
+# | label: p3-cruzada
+con.sql("""
+    WITH q AS (SELECT grupo, rank, recommendations,
+                      NTILE(4) OVER (PARTITION BY grupo ORDER BY recommendations) AS faixa_de_recomendacoes
+               FROM base)
+    SELECT grupo, faixa_de_recomendacoes, COUNT(*) AS n_jogos,
+           MEDIAN(recommendations) AS recomendacoes_mediana, MEDIAN(rank) AS rank_mediano
+    FROM q GROUP BY ALL ORDER BY grupo, faixa_de_recomendacoes
+""").df()
+```
+
+**Leitura da P3.** A relação existe e tem o sinal esperado: correlação de postos de `{python} br(rho_p3)`, e em cada grupo o `rank` mediano cai a cada faixa de recomendações. Mas ela é **moderada, e não forte**, e é um pouco mais forte nos não indies (`{python} br(rhos.loc[3, "correlacao_de_postos"])`) que nos indies (`{python} br(rhos.loc[2, "correlacao_de_postos"])`). A expectativa (relação forte e parecida nos dois grupos) **se sustentou em parte**: parecida, sim; forte, não.
+
+O que cada rival eliminou. Os **valores imputados** não explicam (sem eles a correlação é de `{python} br(rhos.loc[1, "correlacao_de_postos"])`), a **mistura de grupos** também não (a relação aparece nos dois), e a **idade do jogo** não a cria: ela aparece em todas as faixas de datas, e é mais forte nas mais antigas (de `{python} br(rhos.loc[4, "correlacao_de_postos"])` na primeira a `{python} br(rhos.loc[7, "correlacao_de_postos"])` na quarta). Pendentes: o **acaso**; a **direção**, porque um jogo bem colocado na lista aparece mais e tende a ganhar recomendações, e a tabela não diz quem puxa quem; e a estabilidade no tempo.
+
+
+# Bloco 4: a quarentena relida
+
+O `transform.py` grava a quarentena em `data/quarentena/rejeitados.parquet`, e ela é uma segunda fonte: guarda o que o contrato recusou, com o motivo. Nenhuma das três perguntas olhou essas linhas, e elas têm lugar no `rank`.
+
+```{python}
+# | label: quarentena
+quar = "data/quarentena/rejeitados.parquet"
+motivos = con.sql(f"SELECT motivo, COUNT(*) AS linhas, MEDIAN(rank) AS rank_mediano FROM '{quar}' GROUP BY 1 ORDER BY 2 DESC").df()
+tipos = con.sql(f"SELECT COALESCE(type, 'sem ficha') AS tipo, COUNT(*) AS linhas FROM '{quar}' GROUP BY 1 ORDER BY 2 DESC").df()
+n_quar = int(motivos["linhas"].sum())
+n_nao_jogo = con.sql(f"SELECT COUNT(*) FROM '{quar}' WHERE motivo LIKE '%type_fora_dominio%'").fetchall()[0][0]
+perfil = con.sql(f"""
+    SELECT 'quarentena: faixa etária zero, tipo game' AS grupo, COUNT(*) AS n_jogos,
+           ROUND(100 * AVG(Indie::INT)) AS pct_indie, MEDIAN(YEAR(release_date)) AS ano_mediano,
+           MEDIAN(recommendations) AS recomendacoes_mediana
+    FROM '{quar}' WHERE motivo LIKE 'faixa_etaria_zero%' AND type = 'game'
+    UNION ALL
+    SELECT 'trusted explorada', COUNT(*), ROUND(100 * AVG(Indie::INT)), MEDIAN(ano), MEDIAN(recommendations) FROM base
+""").df()
+print(motivos.to_string(index=False))
+print(tipos.to_string(index=False))
+perfil
+```
+
+**Leitura.** A quarentena tem `{python} n_quar` linhas, e `{python} n_nao_jogo` delas são de um tipo que não é jogo (demo, DLC, mod, vídeo): a lista mistura tipos, e o contrato aceita só `game`. O resto é falha de dado, e o maior grupo é a faixa etária "0" que nenhuma entidade confirma. Esses jogos se parecem com a trusted explorada em proporção de indies, ano e recomendações (são poucos, então é só um indício), e por isso a quarentena **não parece enviesar** a P2 nem a P3. O que ela faz é abrir **buracos no `rank`**: as `{python} n_quar` posições da quarentena e as da parte guardada não aparecem na parte explorada, e as comparações por posição precisam conviver com isso.
+
+
+# Bloco 5: hipóteses a confirmar
+
+Uma linha por pergunta. A previsão está escrita de modo que a **parte guardada** possa confirmá-la ou derrubá-la, e a parte guardada continua intocada: nenhum número desta tabela veio dela.
+
+| | Expectativa | O dado mostrou | Rivais eliminadas | Rivais pendentes | Decisão e previsão |
+|:--|:--|:--|:--|:--|:--|
+| **P1** | indies são a maioria e mais baratos | **Se sustentou.** Indies são cerca de 69% dos jogos explorados, e a mediana paga deles é menor que a dos não indies (R$ 37,49 contra R$ 50,00) | jogos grátis; preço convertido ou imputado; idade do jogo | acaso; estabilidade no tempo; os preços convertidos são bem mais altos | Se, na parte guardada, os indies passarem de 50% dos jogos e a mediana paga deles ficar abaixo da dos não indies, vale a leitura "indie é maioria e mais barato" para esta lista; se não, a diferença era circunstancial. |
+| **P2** | sem relação geral entre a data e o `rank` | **Se sustentou.** Correlação de postos de `{python} br(rho_p2)`, sem tendência pelas faixas de datas; poucos clássicos no topo | a mistura de grupos (a correlação é perto de zero nos dois) | acaso; seleção da lista (só entra quem tem 500 avaliações) | Se, na parte guardada, a correlação de postos entre a data e o `rank` ficar entre -0,15 e 0,15, a data de lançamento não ajuda a prever a posição; se sair dessa faixa, a expectativa cai. |
+| **P3** | relação forte e parecida entre recomendações e `rank`, nos dois grupos | **Em parte.** Relação moderada (`{python} br(rho_p3)`), parecida nos dois grupos (`{python} br(rhos.loc[2, "correlacao_de_postos"])` e `{python} br(rhos.loc[3, "correlacao_de_postos"])`); não é forte | os valores imputados; a mistura de grupos; a idade do jogo | acaso; a direção (quem puxa quem); estabilidade no tempo | Se, na parte guardada, a correlação de postos for -0,30 ou menor, e a diferença entre indies e não indies for menor que 0,20, recomendações servem como indício de posição nos dois grupos; se ficar acima de -0,30 em qualquer grupo, a relação cai. |
+
+Nenhuma expectativa passou inteira com o que se escreveu, e isso é o achado: na P3, a relação tem o sinal certo, mas é de tamanho moderado, e a expectativa revista é a que vai para a confirmação.
+
+
+# Bloco 6: perguntas para depois
+
+Sem investigar agora:
+
+- Os preços convertidos de outra moeda são bem mais altos que os demais (R$ 86,72 entre os indies e R$ 159,96 entre os não indies): a conversão tem um erro sistemático, ou são jogos de outro tipo?
+- Os picos do preço em poucos valores (R$ 59,99, 16,99, 32,99 e 46,99): são faixas fixas de preço da loja convertidas de outra moeda?
+- A relação entre recomendações e `rank` é mais forte nos jogos mais antigos do que nos mais novos: por quê?
+- A coluna `Indie` é um gênero que o próprio desenvolvedor declara: um jogo indie "de verdade" sem o gênero cai no grupo errado?
+- Como as posições que faltam no `rank` (quarentena e parte guardada) mudam as comparações por posição?
