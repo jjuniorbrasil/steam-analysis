@@ -18,6 +18,7 @@ data/raw/*
 !data/raw/ids-steamdb-*.csv
 data/trusted/*
 data/quarentena/*
+data/gold/*
 
 .docs
 /.quarto/

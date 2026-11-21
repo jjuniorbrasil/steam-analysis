@@ -22,10 +22,10 @@ O dado é o ranking de jogos da Steam (`data/trusted/jogos.parquet`): uma linha 
 com `rank` de 1 a 1000 (1 é o topo). Como a coleta é um retrato único, a parte guardada **não pode ser
 por tempo**; e cortar por `release_date` seria pior ainda, porque a data é justamente a coluna da P2
 (tirar os jogos mais novos ou mais antigos mudaria a resposta). O corte é então **por sorteio**:
-20% dos jogos (182) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
+15% dos jogos (136) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
 
 O sorteio é reproduzível: ordena os jogos por um *hash* do `appid` com uma semente fixa e guarda os
-primeiros 20%. Trocar a semente ou a fração muda o sorteio; 
+primeiros 15%. Trocar a semente ou a fração muda o sorteio; 
 
 ```{python}
 # | label: setup
@@ -33,7 +33,7 @@ import duckdb
 import numpy as np
 import plotly.express as px
 
-FRACAO_GUARDADA = 0.20            # parte guardada para a confirmação
+FRACAO_GUARDADA = 0.15            # parte guardada para a confirmação
 SEMENTE = "icd-jogos-1"           # fixa o sorteio;
 CAMINHO = "data/trusted/jogos.parquet" 
 
