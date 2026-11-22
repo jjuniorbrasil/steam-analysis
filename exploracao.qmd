@@ -22,10 +22,10 @@ O dado é o ranking de jogos da Steam (`data/trusted/jogos.parquet`): uma linha 
 com `rank` de 1 a 1000 (1 é o topo). Como a coleta é um retrato único, a parte guardada **não pode ser
 por tempo**; e cortar por `release_date` seria pior ainda, porque a data é justamente a coluna da P2
 (tirar os jogos mais novos ou mais antigos mudaria a resposta). O corte é então **por sorteio**:
-15% dos jogos (136) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
+20% dos jogos (182) ficam guardados para a confirmação na aula de Análise e **não são olhados aqui**.
 
 O sorteio é reproduzível: ordena os jogos por um *hash* do `appid` com uma semente fixa e guarda os
-primeiros 15%. Trocar a semente ou a fração muda o sorteio; 
+primeiros 20%. Trocar a semente ou a fração muda o sorteio; 
 
 ```{python}
 # | label: setup
@@ -33,7 +33,7 @@ import duckdb
 import numpy as np
 import plotly.express as px
 
-FRACAO_GUARDADA = 0.15            # parte guardada para a confirmação
+FRACAO_GUARDADA = 0.20            # parte guardada para a confirmação
 SEMENTE = "icd-jogos-1"           # fixa o sorteio;
 CAMINHO = "data/trusted/jogos.parquet" 
 
@@ -41,7 +41,7 @@ con = duckdb.connect()
 n_total = con.execute(f"SELECT COUNT(*) FROM '{CAMINHO}'").fetchall()[0][0]
 n_guardados = int(np.ceil(FRACAO_GUARDADA * n_total))
 
-con.execute(f"""CREATE VIEW jogos AS          -- só a parte da exploração (85%)
+con.execute(f"""CREATE VIEW jogos AS          -- só a parte da exploração (80%)
     SELECT * EXCLUDE (ordem) FROM (
         SELECT *, ROW_NUMBER() OVER (ORDER BY hash(appid::VARCHAR || '-{SEMENTE}')) AS ordem
         FROM '{CAMINHO}')
@@ -406,7 +406,34 @@ valores de recomendações imputados não mudam o quadro (rank mediano 482 contr
 Pendentes: o rank pode depender de outra coisa (horas jogadas, avaliações positivas), e as recomendações
 dependem da idade do jogo (ver P2) e do tamanho da audiência. O dado não decide a direção.
 
-# Bloco 6: a tabela de hipóteses a confirmar
+# Bloco 6: a quarentena relida
+
+O `transform.py` grava a quarentena em `data/quarentena/rejeitados.parquet`, e ela é uma segunda fonte: guarda o que o contrato recusou, com o motivo. Nenhuma das três perguntas olhou essas linhas, e elas têm lugar no `rank`.
+
+```{python}
+# | label: quarentena
+quar = "data/quarentena/rejeitados.parquet"
+motivos = con.sql(f"SELECT motivo, COUNT(*) AS linhas, MEDIAN(rank) AS rank_mediano FROM '{quar}' GROUP BY 1 ORDER BY 2 DESC").df()
+tipos = con.sql(f"SELECT COALESCE(type, 'sem ficha') AS tipo, COUNT(*) AS linhas FROM '{quar}' GROUP BY 1 ORDER BY 2 DESC").df()
+n_quar = int(motivos["linhas"].sum())
+n_nao_jogo = con.sql(f"SELECT COUNT(*) FROM '{quar}' WHERE motivo LIKE '%type_fora_dominio%'").fetchall()[0][0]
+perfil = con.sql(f"""
+    SELECT 'quarentena: faixa etária zero, tipo game' AS grupo, COUNT(*) AS n_jogos,
+           ROUND(100 * AVG(Indie::INT)) AS pct_indie, MEDIAN(YEAR(release_date)) AS ano_mediano,
+           MEDIAN(recommendations) AS recomendacoes_mediana
+    FROM '{quar}' WHERE motivo LIKE 'faixa_etaria_zero%' AND type = 'game'
+    UNION ALL
+    SELECT 'trusted explorada', COUNT(*), ROUND(100 * AVG(Indie::INT)), MEDIAN(ano), MEDIAN(recommendations) FROM base
+""").df()
+print(motivos.to_string(index=False))
+print(tipos.to_string(index=False))
+perfil
+```
+
+**Leitura.** A quarentena tem `{python} n_quar` linhas, e `{python} n_nao_jogo` delas são de um tipo que não é jogo (demo, DLC, mod, vídeo): a lista mistura tipos, e o contrato aceita só `game`. O resto é falha de dado, e o maior grupo é a faixa etária "0" que nenhuma entidade confirma. Esses jogos se parecem com a trusted explorada em proporção de indies, ano e recomendações (são poucos, então é só um indício), e por isso a quarentena **não parece enviesar** a P2 nem a P3. O que ela faz é abrir **buracos no `rank`**: as `{python} n_quar` posições da quarentena e as da parte guardada não aparecem na parte explorada, e as comparações por posição precisam conviver com isso.
+
+
+# Bloco 7: a tabela de hipóteses a confirmar
 
 Uma linha por pergunta. A previsão diz o que conferir nos 182 jogos guardados: se ela falhar, a hipótese cai.
 Com 182 jogos, as conferências por grupo são frágeis; por isso as previsões
@@ -418,7 +445,7 @@ falam de **sentido e ordem de grandeza**, não de números exatos.
 | P2 | Sem relação geral entre antiguidade e rank | Correlação de postos +0,04; faixa mais antiga com rank mediano 532 (mais nova 521, meio 429 a 481); 16 jogos no top 100 contra 9 na mais nova. **Não sustentada** (não há relação) | Grupo indie/não indie (correlação ≈ +0,04 e +0,02) | O critério que gera o `rank`; clássicos da Valve podem ser exceção por serem marcas | Nos guardados: \|correlação de postos\| abaixo de 0,15, sem faixa de data com rank mediano muito melhor que as outras; se passar de 0,3 em módulo, cai |
 | P3 | Mais recomendações, rank melhor, igual nos dois grupos | Correlação −0,42; rank mediano de 692 a 276 do menor ao maior quartil; −0,40 (indies) e −0,49 (não indies). **Sustentada em parte** (mais fraca que o esperado) | Diferença de sentido entre indies e não indies; recomendações imputadas | Idade do jogo e audiência como causa comum; critério do rank | Nos guardados: correlação de postos entre −0,3 e −0,6, com sinal negativo nos dois grupos; se for positiva ou perto de zero em algum grupo, cai. Na Análise, regressão de `rank` sobre recomendações e ano de lançamento |
 
-# Bloco 7: perguntas para depois
+# Bloco 8: perguntas para depois
 
 Sem investigar agora.
 
